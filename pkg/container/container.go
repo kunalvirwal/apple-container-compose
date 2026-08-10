@@ -17,6 +17,7 @@ func NewContainerClient(run func(ctx context.Context, args ...string) (string, e
 	}
 }
 
+// ListOptions defines the options for listing containers
 type ListOptions struct {
 	// Display both running and stopped containers
 	All bool
@@ -24,6 +25,7 @@ type ListOptions struct {
 	Quiet bool
 }
 
+// List returns a list of containers based on the provided options
 func (c *ContainerClient) List(ctx context.Context, opts ListOptions) (string, error) {
 	args := []string{"list"}
 
@@ -61,6 +63,7 @@ type CreateOptions struct {
 	// [TODO]: add env varable support
 }
 
+// PortMapping defines a mapping from a host port to a container port as taken by the container cli
 type PortMapping struct {
 	HostIP        string
 	HostPort      uint16
@@ -68,6 +71,7 @@ type PortMapping struct {
 	Protocol      Protocol // "tcp" or "udp"
 }
 
+// Protocol types accepted by the container cli defined in the container package: TCP and UDP
 type Protocol string
 
 const (
@@ -75,6 +79,7 @@ const (
 	UDP Protocol = "udp"
 )
 
+// Run creates and starts a new container based on the provided image and options. Returns true if the container was successfully created and started, or an error if the operation fails.
 func (c *ContainerClient) Run(ctx context.Context, image string, opts CreateOptions) (bool, error) {
 	args := []string{"run"}
 
@@ -130,4 +135,96 @@ func (c *ContainerClient) Run(ctx context.Context, image string, opts CreateOpti
 		}
 	}
 	return true, err
+}
+
+// StopOptions defines the options for stopping containers
+type StopOptions struct {
+	// Stop all running containers
+	All bool
+	// List of container IDs or names to stop, should be empty if All flag is true
+	IDs []string
+	// Seconds to wait before killing the containers (default: 5)
+	Time uint
+	// Signal to send to the containers (default: SIGTERM)
+	Signal Signal
+}
+
+// Signal defines the signal types accepted by the container cli defined under container package
+type Signal string
+
+const (
+	SIGTERM Signal = "SIGTERM"
+	SIGKILL Signal = "SIGKILL"
+	SIGINT  Signal = "SIGINT"
+	SIGQUIT Signal = "SIGQUIT"
+	SIGUSR1 Signal = "SIGUSR1"
+	SIGUSR2 Signal = "SIGUSR2"
+)
+
+// Stop stops one or more running containers based on the provided options. Returns the ID of the stopped container(s) and an error if the operation fails.
+func (c *ContainerClient) Stop(ctx context.Context, opts StopOptions) (string, error) {
+	args := []string{}
+	if opts.Signal != "" {
+		args = append(args, "--signal", string(opts.Signal))
+	}
+	if opts.Time > 0 {
+		args = append(args, "--time", strconv.Itoa(int(opts.Time)))
+	}
+	if opts.All {
+		if len(opts.IDs) > 0 {
+			return "", ErrInvalidOptions
+		}
+		out, err := c.run(ctx, append([]string{"stop", "--all"}, args...)...)
+		if err != nil {
+			return out, err
+		}
+		return out, nil
+	}
+	if len(opts.IDs) == 0 {
+		return "", ErrInvalidOptions
+	}
+	args = append(args, opts.IDs...)
+	args = append([]string{"stop"}, args...)
+	out, err := c.run(ctx, args...)
+	if err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+type DeleteOptions struct {
+	// Delete all containers
+	All bool
+	// List of container IDs or names to delete, should be empty if All flag is true
+	IDs []string
+	// Force deletion of running containers
+	Force bool
+}
+
+// Delete deletes one or more containers based on the provided options. Returns the ID of the deleted container(s) and an error if the operation fails.
+func (c *ContainerClient) Delete(ctx context.Context, opts DeleteOptions) (string, error) {
+	args := []string{}
+	if opts.Force {
+		args = append(args, "--force")
+	}
+	if opts.All {
+		if len(opts.IDs) > 0 {
+			return "", ErrInvalidOptions
+		}
+		out, err := c.run(ctx, append([]string{"delete", "--all"}, args...)...)
+		if err != nil {
+			return out, err
+		}
+		return out, nil
+	}
+	if len(opts.IDs) == 0 {
+		return "", ErrInvalidOptions
+	}
+	args = append(args, opts.IDs...)
+	args = append([]string{"delete"}, args...)
+	out, err := c.run(ctx, args...)
+	if err != nil {
+		return out, err
+	}
+	return out, nil
 }
