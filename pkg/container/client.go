@@ -26,11 +26,7 @@ func NewClient() (*Client, error) {
 	return c, nil
 }
 
-func (c *Client) run(args ...string) (string, error) {
-	return c.runctx(context.Background(), args...)
-}
-
-func (c *Client) runctx(ctx context.Context, args ...string) (string, error) {
+func (c *Client) run(ctx context.Context, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, c.Bin, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -47,8 +43,8 @@ func (c *Client) Available() bool {
 	return err == nil
 }
 
-func (c *Client) SystemRunning() bool {
-	out, err := c.run("system", "status")
+func (c *Client) SystemRunning(ctx context.Context) bool {
+	out, err := c.run(ctx, "system", "status")
 	if err != nil {
 		return false
 	}

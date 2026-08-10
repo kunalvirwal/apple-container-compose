@@ -1,21 +1,22 @@
 package container
 
 import (
+	"context"
 	"strings"
 )
 
 type SystemClient struct {
-	run func(args ...string) (string, error)
+	run func(ctx context.Context, args ...string) (string, error)
 }
 
-func NewSystemClient(run func(args ...string) (string, error)) SystemClient {
+func NewSystemClient(run func(ctx context.Context, args ...string) (string, error)) SystemClient {
 	return SystemClient{
 		run: run,
 	}
 }
 
-func (s *SystemClient) Status() (string, error) {
-	out, err := s.run("system", "status")
+func (s *SystemClient) Status(ctx context.Context) (string, error) {
+	out, err := s.run(ctx, "system", "status")
 	if err != nil {
 		if strings.Contains(out, "not running") {
 			return out, ErrSystemNotRunning
@@ -24,8 +25,8 @@ func (s *SystemClient) Status() (string, error) {
 	return out, err
 }
 
-func (s *SystemClient) Start() (bool, error) {
-	out, err := s.run("system", "start")
+func (s *SystemClient) Start(ctx context.Context) (bool, error) {
+	out, err := s.run(ctx, "system", "start")
 	if err != nil {
 		return false, err
 	}
@@ -35,8 +36,8 @@ func (s *SystemClient) Start() (bool, error) {
 	return false, err
 }
 
-func (s *SystemClient) Stop() (bool, error) {
-	out, err := s.run("system", "stop")
+func (s *SystemClient) Stop(ctx context.Context) (bool, error) {
+	out, err := s.run(ctx, "system", "stop")
 	if err != nil {
 		return false, err
 	}
