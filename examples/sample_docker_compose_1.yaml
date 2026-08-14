@@ -1,0 +1,13 @@
+services:
+  web:
+    image: nginx:latest
+    ports:
+      - "8080:80"
+    environment:
+      NODE_ENV: ${FOO:-production}
+  web2:
+    image: nginx:latest
+    ports:
+      - "8081:80"
+    environment:
+      NODE_ENV: ${FOO:-production}
