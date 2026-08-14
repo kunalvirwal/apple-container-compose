@@ -6,8 +6,10 @@ services:
     environment:
       NODE_ENV: ${FOO:-production}
   web2:
-    image: nginx:latest
+    image: my-app:latest
+    build:
+      context: ./examples
     ports:
       - "8081:80"
     environment:
-      NODE_ENV: ${FOO:-production}
+      PORT: 80

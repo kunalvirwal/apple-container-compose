@@ -99,12 +99,24 @@ func main() {
 	// err = composeClient.Up(context.Background(), composeFilePath, compose.ParseOptions{
 	// 	ProjectName: "my-project",
 	// 	WorkingDir:  "./examples",
-	// }, compose.UpOptions{})
+	// }, compose.UpOptions{
+	// 	Build: true,
+	// })
 	// if err != nil {
 	// 	fmt.Println("error starting compose services:", err)
 	// 	return
 	// }
 	// fmt.Println("compose services started successfully")
+
+	// err = composeClient.BuildImages(context.Background(), composeFilePath, compose.ParseOptions{
+	// 	ProjectName: "my-project",
+	// 	WorkingDir:  "./examples",
+	//  }, compose.BuildOptions{})
+	// if err != nil {
+	// 	fmt.Println("error building compose images:", err)
+	// 	return
+	// }
+	// fmt.Println("compose images built successfully")
 
 	err = composeClient.Down(context.Background(), composeFilePath, compose.ParseOptions{
 		ProjectName: "my-project",

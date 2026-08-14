@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -43,8 +44,6 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 	if err != nil {
 		return err
 	}
-	fmt.Println(services)
-	
 
 	for _, serviceName := range services {
 		svc, err := project.GetService(serviceName)
@@ -67,6 +66,17 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 		}
 
 		if _, err := c.containerClient.Container.Run(ctx, image, createOpts); err != nil {
+			if svc.Build != nil && !opts.Build && isImagePullFailure(err) {
+				if buildErr := c.BuildImages(ctx, path, parseOpts, BuildOptions{Services: []string{serviceName}, Output: opts.Output}); buildErr != nil {
+					return buildErr
+				}
+				if _, retryErr := c.containerClient.Container.Run(ctx, image, createOpts); retryErr != nil {
+					if !isAlreadyRunningOrExisting(retryErr) {
+						return retryErr
+					}
+				}
+				continue
+			}
 			if !isAlreadyRunningOrExisting(err) {
 				return err
 			}
@@ -79,8 +89,9 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 // toCreateOptions converts compose service run-time settings into container create options.
 func toCreateOptions(service types.ServiceConfig, name string) (container.CreateOptions, error) {
 	createOpts := container.CreateOptions{
-		Name:      name,
-		Arguments: shellCommandToArgs(service.Command),
+		Name:        name,
+		Environment: serviceEnvironmentToList(service.Environment),
+		Arguments:   shellCommandToArgs(service.Command),
 	}
 
 	if service.CPUS > 0 {
@@ -127,6 +138,32 @@ func toCreateOptions(service types.ServiceConfig, name string) (container.Create
 	return createOpts, nil
 }
 
+// serviceEnvironmentToList converts compose environment entries into container
+// CLI --env flag values.
+func serviceEnvironmentToList(env types.MappingWithEquals) []string {
+	if len(env) == 0 {
+		return nil
+	}
+
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	entries := make([]string, 0, len(keys))
+	for _, key := range keys {
+		val := env[key]
+		if val == nil {
+			entries = append(entries, key)
+			continue
+		}
+		entries = append(entries, key+"="+*val)
+	}
+
+	return entries
+}
+
 // formatMemory converts Compose's byte-based memory limit to the container
 // CLI's MiByte-based memory format.
 func formatMemory(bytes uint64) string {
@@ -150,7 +187,6 @@ func shellCommandToArgs(cmd types.ShellCommand) []string {
 	return args
 }
 
-
 // isAlreadyRunningOrExisting normalizes runtime errors for idempotent up operations.
 func isAlreadyRunningOrExisting(err error) bool {
 	if err == nil {
@@ -158,4 +194,18 @@ func isAlreadyRunningOrExisting(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "already exists") || strings.Contains(msg, "is already running")
+}
+
+// isImagePullFailure checks common image pull/lookup failures from container run.
+func isImagePullFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "pull access denied") ||
+		strings.Contains(msg, "failed to resolve") ||
+		strings.Contains(msg, "failed to pull") ||
+		strings.Contains(msg, "manifest unknown") ||
+		strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "no such image")
 }

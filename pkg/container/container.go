@@ -57,6 +57,8 @@ type CreateOptions struct {
 	Rm bool
 	// Port mappings
 	Publish []PortMapping
+	// Environment variables in KEY=VALUE (or KEY) format.
+	Environment []string
 	// Container init Process arguments, if any
 	Arguments []string
 
@@ -103,6 +105,14 @@ func (c *ContainerClient) Run(ctx context.Context, image string, opts CreateOpti
 	}
 	if opts.Rm {
 		args = append(args, "--rm")
+	}
+	if len(opts.Environment) > 0 {
+		for _, entry := range opts.Environment {
+			if strings.TrimSpace(entry) == "" {
+				continue
+			}
+			args = append(args, "--env", entry)
+		}
 	}
 	if opts.Publish != nil {
 		for _, mapping := range opts.Publish {

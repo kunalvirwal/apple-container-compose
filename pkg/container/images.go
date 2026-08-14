@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -87,17 +88,35 @@ type BuildOptions struct {
 func (i *ImageClient) Build(ctx context.Context, opts BuildOptions, out io.Writer) (string, error) {
 	args := []string{"build"}
 
+	contextPath := opts.ContextDir
+	if contextPath == "" {
+		contextPath = "."
+	}
+
 	if opts.Tag != "" {
 		args = append(args, "--tag", opts.Tag)
 	}
 	if opts.File != "" {
-		if _, err := os.Stat(opts.File); err != nil {
-			if os.IsNotExist(err) {
-				return "", fmt.Errorf("dockerfile not found: %s", opts.File)
-			}
-			return "", fmt.Errorf("Unable to read the file %q: %w", opts.File, err)
+		dockerfilePath := opts.File
+		if !filepath.IsAbs(dockerfilePath) {
+			dockerfilePath = filepath.Join(contextPath, dockerfilePath)
 		}
-		args = append(args, "--file", opts.File)
+		if _, err := os.Stat(dockerfilePath); err != nil {
+			if os.IsNotExist(err) {
+				return "", fmt.Errorf("dockerfile not found: %s", dockerfilePath)
+			}
+			return "", fmt.Errorf("unable to read file %q: %w", dockerfilePath, err)
+		}
+		args = append(args, "--file", dockerfilePath)
+	} else {
+		dockerfilePath := filepath.Join(contextPath, "Dockerfile")
+		if _, err := os.Stat(dockerfilePath); err != nil {
+			if os.IsNotExist(err) {
+				return "", fmt.Errorf("dockerfile not found in context dir: %s", contextPath)
+			}
+			return "", fmt.Errorf("unable to read Dockerfile in context dir %q: %w", contextPath, err)
+		}
+		args = append(args, "--file", dockerfilePath)
 	}
 	if opts.NoCache {
 		args = append(args, "--no-cache")
@@ -133,10 +152,6 @@ func (i *ImageClient) Build(ctx context.Context, opts BuildOptions, out io.Write
 		args = append(args, "--pull")
 	}
 
-	contextPath := opts.ContextDir
-	if contextPath == "" {
-		contextPath = "."
-	}
 	args = append(args, contextPath)
 
 	buildOut, err := i.runStreaming(ctx, out, args...)
