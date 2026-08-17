@@ -28,7 +28,7 @@ func NewClient() (*Client, error) {
 	if !c.SystemRunning(context.Background()) {
 		return nil, ErrSystemNotRunning
 	}
-	c.Container = NewContainerClient(c.run)
+	c.Container = NewContainerClient(c.run, c.runStreaming)
 	c.System = NewSystemClient(c.run)
 	c.Images = NewImageClient(c.run, c.runStreaming)
 	return c, nil

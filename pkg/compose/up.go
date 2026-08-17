@@ -2,11 +2,13 @@ package compose
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/kunalvirwal/apple-container-compose/pkg/container"
@@ -18,8 +20,13 @@ type UpOptions struct {
 	Services []string
 	// Build triggers image build before starting containers.
 	Build bool
-	// Output receives streaming build output when Build is enabled.
+	// Output receives build output and attached service logs when enabled.
 	Output io.Writer
+	// Attach streams service logs until detached or context cancellation.
+	Attach bool
+	// Detach, when non-nil, detaches attached log streaming when signaled.
+	// Canceling the context also detaches.
+	Detach <-chan struct{}
 }
 
 // Up brings selected services up in dependency order.
@@ -83,7 +90,97 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 		}
 	}
 
+	if opts.Attach {
+		if err := c.streamLogsUntilDetach(ctx, project.Name, services, opts); err != nil {
+			return err
+		}
+	}
+
 	return nil
+}
+
+// streamLogsUntilDetach streams logs for selected services and detaches on signal.
+func (c *ComposeClient) streamLogsUntilDetach(ctx context.Context, projectName string, services []string, opts UpOptions) error {
+	if len(services) == 0 {
+		return nil
+	}
+
+	output := opts.Output
+	if output == nil {
+		output = io.Discard
+	}
+
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errCh := make(chan error, len(services))
+	var wg sync.WaitGroup
+	sharedWriter := &synchronizedWriter{w: output}
+
+	for _, serviceName := range services {
+		containerID := containerName(projectName, serviceName)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			prefixed := newPrefixedWriter(sharedWriter, "["+serviceName+"] ")
+			_, err := c.containerClient.Container.Logs(streamCtx, container.LogsOptions{
+				Follow: true,
+				IDs:    []string{containerID},
+			}, prefixed)
+			if err != nil && !errors.Is(err, context.Canceled) {
+				errCh <- err
+			}
+		}()
+	}
+
+	select {
+	case <-ctx.Done():
+		cancel()
+	case err := <-errCh:
+		cancel()
+		wg.Wait()
+		return err
+	case <-opts.Detach:
+		cancel()
+	}
+
+	wg.Wait()
+	return nil
+}
+
+type synchronizedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (w *synchronizedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.w.Write(p)
+}
+
+type prefixedWriter struct {
+	target io.Writer
+	prefix string
+	buf    strings.Builder
+}
+
+func newPrefixedWriter(target io.Writer, prefix string) *prefixedWriter {
+	return &prefixedWriter{target: target, prefix: prefix}
+}
+
+func (w *prefixedWriter) Write(p []byte) (int, error) {
+	for _, b := range p {
+		w.buf.WriteByte(b)
+		if b == '\n' {
+			line := w.buf.String()
+			w.buf.Reset()
+			if _, err := io.WriteString(w.target, w.prefix+line); err != nil {
+				return 0, err
+			}
+		}
+	}
+	return len(p), nil
 }
 
 // toCreateOptions converts compose service run-time settings into container create options.

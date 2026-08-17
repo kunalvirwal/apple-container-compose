@@ -2,18 +2,24 @@ package container
 
 import (
 	"context"
+	"io"
 	"net"
 	"strconv"
 	"strings"
 )
 
 type ContainerClient struct {
-	run func(ctx context.Context, args ...string) (string, error)
+	run          func(ctx context.Context, args ...string) (string, error)
+	runStreaming func(ctx context.Context, out io.Writer, args ...string) (string, error)
 }
 
-func NewContainerClient(run func(ctx context.Context, args ...string) (string, error)) ContainerClient {
+func NewContainerClient(
+	run func(ctx context.Context, args ...string) (string, error),
+	runStreaming func(ctx context.Context, out io.Writer, args ...string) (string, error),
+) ContainerClient {
 	return ContainerClient{
-		run: run,
+		run:          run,
+		runStreaming: runStreaming,
 	}
 }
 
@@ -61,8 +67,6 @@ type CreateOptions struct {
 	Environment []string
 	// Container init Process arguments, if any
 	Arguments []string
-
-	// [TODO]: add env varable support
 }
 
 // PortMapping defines a mapping from a host port to a container port as taken by the container cli
@@ -145,6 +149,44 @@ func (c *ContainerClient) Run(ctx context.Context, image string, opts CreateOpti
 		}
 	}
 	return true, err
+}
+
+// LogsOptions defines options for streaming or fetching container logs.
+type LogsOptions struct {
+	// Follow streams logs continuously until context cancellation or process exit.
+	Follow bool
+	// IDs are container IDs or names to fetch logs for.
+	IDs []string
+}
+
+// Logs streams container logs to the provided writer.
+func (c *ContainerClient) Logs(ctx context.Context, opts LogsOptions, out io.Writer) (string, error) {
+	if len(opts.IDs) == 0 {
+		return "", ErrInvalidOptions
+	}
+
+	args := []string{"logs"}
+	if opts.Follow {
+		args = append(args, "--follow")
+	}
+	args = append(args, opts.IDs...)
+
+	if c.runStreaming != nil {
+		logsOut, err := c.runStreaming(ctx, out, args...)
+		if err != nil && strings.Contains(logsOut, "XPC connection error") {
+			return logsOut, ErrSystemNotRunning
+		}
+		return logsOut, err
+	}
+
+	logsOut, err := c.run(ctx, args...)
+	if out != nil && logsOut != "" {
+		_, _ = out.Write([]byte(logsOut))
+	}
+	if err != nil && strings.Contains(logsOut, "XPC connection error") {
+		return logsOut, ErrSystemNotRunning
+	}
+	return logsOut, err
 }
 
 // StopOptions defines the options for stopping containers

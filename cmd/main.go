@@ -100,7 +100,9 @@ func main() {
 	// 	ProjectName: "my-project",
 	// 	WorkingDir:  "./examples",
 	// }, compose.UpOptions{
-	// 	Build: true,
+	// 	Build:  true,
+	// 	Output: os.Stdout,
+	// 	Attach: true,
 	// })
 	// if err != nil {
 	// 	fmt.Println("error starting compose services:", err)
