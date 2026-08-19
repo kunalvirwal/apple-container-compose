@@ -18,10 +18,13 @@ import (
 type UpOptions struct {
 	// Services limits startup to the selected services. Empty means all services.
 	Services []string
-	// Build triggers image build before starting containers.
+	// Build forces all buildable services to build before any containers start.
+	// Without it, a buildable service is built only when its local image is absent.
 	Build bool
 	// Output receives build output and attached service logs when enabled.
 	Output io.Writer
+	// BuildOutput receives build output. When nil, Output is used.
+	BuildOutput io.Writer
 	// Attach streams service logs until detached or context cancellation.
 	Attach bool
 	// Detach, when non-nil, detaches attached log streaming when signaled.
@@ -29,8 +32,8 @@ type UpOptions struct {
 	Detach <-chan struct{}
 }
 
-// Up brings selected services up in dependency order.
-// It can optionally build images before creating and starting containers.
+// Up brings selected services up in dependency order. It builds missing local
+// images for services that declare build configuration before starting them.
 func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOptions, opts UpOptions) error {
 	if c.containerClient == nil {
 		return ErrContainerClientNil
@@ -41,8 +44,13 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 		return err
 	}
 
+	buildOutput := opts.BuildOutput
+	if buildOutput == nil {
+		buildOutput = opts.Output
+	}
+
 	if opts.Build {
-		if err := c.BuildImages(ctx, path, parseOpts, BuildOptions{Services: opts.Services, Output: opts.Output}); err != nil {
+		if err := c.buildProject(ctx, project, BuildOptions{Services: opts.Services, Output: buildOutput}); err != nil {
 			return err
 		}
 	}
@@ -65,6 +73,17 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 			}
 			image = containerName(project.Name, serviceName)
 		}
+		if svc.Build != nil && !opts.Build {
+			exists, err := c.containerClient.Images.Exists(ctx, image)
+			if err != nil {
+				return err
+			}
+			if !exists {
+				if err := c.buildService(ctx, project, serviceName, svc, buildOutput); err != nil {
+					return err
+				}
+			}
+		}
 
 		name := containerName(project.Name, serviceName)
 		createOpts, err := toCreateOptions(svc, name)
@@ -73,17 +92,6 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 		}
 
 		if _, err := c.containerClient.Container.Run(ctx, image, createOpts); err != nil {
-			if svc.Build != nil && !opts.Build && isImagePullFailure(err) {
-				if buildErr := c.BuildImages(ctx, path, parseOpts, BuildOptions{Services: []string{serviceName}, Output: opts.Output}); buildErr != nil {
-					return buildErr
-				}
-				if _, retryErr := c.containerClient.Container.Run(ctx, image, createOpts); retryErr != nil {
-					if !isAlreadyRunningOrExisting(retryErr) {
-						return retryErr
-					}
-				}
-				continue
-			}
 			if !isAlreadyRunningOrExisting(err) {
 				return err
 			}
@@ -291,18 +299,4 @@ func isAlreadyRunningOrExisting(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "already exists") || strings.Contains(msg, "is already running")
-}
-
-// isImagePullFailure checks common image pull/lookup failures from container run.
-func isImagePullFailure(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "pull access denied") ||
-		strings.Contains(msg, "failed to resolve") ||
-		strings.Contains(msg, "failed to pull") ||
-		strings.Contains(msg, "manifest unknown") ||
-		strings.Contains(msg, "not found") ||
-		strings.Contains(msg, "no such image")
 }

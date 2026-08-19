@@ -56,6 +56,26 @@ func (i *ImageClient) List(ctx context.Context, quiet bool) (string, error) {
 	return out, err
 }
 
+// Exists reports whether an image reference is available in the local image store.
+func (i *ImageClient) Exists(ctx context.Context, reference string) (bool, error) {
+	out, err := i.run(ctx, "image", "inspect", reference)
+	if err == nil {
+		return true, nil
+	}
+	if isImageNotFoundError(out, err) {
+		return false, nil
+	}
+	return false, err
+}
+
+func isImageNotFoundError(output string, err error) bool {
+	message := strings.ToLower(output)
+	if err != nil {
+		message += "\n" + strings.ToLower(err.Error())
+	}
+	return strings.Contains(message, "not found") || strings.Contains(message, "no such image")
+}
+
 // BuildOptions defines the options for building an image.
 type BuildOptions struct {
 	// The build context path. Defaults to current directory when empty.

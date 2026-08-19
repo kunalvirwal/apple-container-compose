@@ -27,6 +27,14 @@ func (c *ComposeClient) BuildImages(ctx context.Context, path string, parseOpts 
 	if err != nil {
 		return err
 	}
+	return c.buildProject(ctx, project, opts)
+}
+
+// buildProject builds images for services in an already-loaded Compose project.
+func (c *ComposeClient) buildProject(ctx context.Context, project *types.Project, opts BuildOptions) error {
+	if c.containerClient == nil {
+		return ErrContainerClientNil
+	}
 
 	services, err := generateServiceOrder(project, opts.Services)
 	if err != nil {
@@ -38,18 +46,23 @@ func (c *ComposeClient) BuildImages(ctx context.Context, path string, parseOpts 
 		if err != nil {
 			return err
 		}
-		if svc.Build == nil {
-			continue
-		}
-
-		containerBuildOptions := toImageBuildOptions(project, serviceName, svc)
-
-		if _, err := c.containerClient.Images.Build(ctx, containerBuildOptions, opts.Output); err != nil {
+		if err := c.buildService(ctx, project, serviceName, svc, opts.Output); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+// buildService builds one service when it declares a build configuration.
+func (c *ComposeClient) buildService(ctx context.Context, project *types.Project, serviceName string, service types.ServiceConfig, output io.Writer) error {
+	if service.Build == nil {
+		return nil
+	}
+
+	containerBuildOptions := toImageBuildOptions(project, serviceName, service)
+	_, err := c.containerClient.Images.Build(ctx, containerBuildOptions, output)
+	return err
 }
 
 // toImageBuildOptions converts a compose service build section into container build options.
