@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/kunalvirwal/apple-container-compose/pkg/container"
@@ -49,15 +50,16 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 		buildOutput = opts.Output
 	}
 
-	if opts.Build {
-		if err := c.buildProject(ctx, project, BuildOptions{Services: opts.Services, Output: buildOutput}); err != nil {
-			return err
-		}
-	}
-
 	services, err := generateServiceOrder(project, opts.Services)
 	if err != nil {
 		return err
+	}
+	if err := c.resolveServiceImages(ctx, project, services, opts.Build, buildOutput); err != nil {
+		return err
+	}
+	var logSession *serviceLogSession
+	if opts.Attach {
+		logSession = newServiceLogSession(c, ctx, opts.Output, len(services))
 	}
 
 	for _, serviceName := range services {
@@ -73,18 +75,6 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 			}
 			image = containerName(project.Name, serviceName)
 		}
-		if svc.Build != nil && !opts.Build {
-			exists, err := c.containerClient.Images.Exists(ctx, image)
-			if err != nil {
-				return err
-			}
-			if !exists {
-				if err := c.buildService(ctx, project, serviceName, svc, buildOutput); err != nil {
-					return err
-				}
-			}
-		}
-
 		name := containerName(project.Name, serviceName)
 		createOpts, err := toCreateOptions(svc, name)
 		if err != nil {
@@ -96,64 +86,126 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 				return err
 			}
 		}
+		if logSession != nil {
+			logSession.Start(project.Name, serviceName)
+		}
 	}
 
-	if opts.Attach {
-		if err := c.streamLogsUntilDetach(ctx, project.Name, services, opts); err != nil {
-			return err
-		}
+	if logSession != nil {
+		return logSession.Wait(opts.Detach)
 	}
 
 	return nil
 }
 
-// streamLogsUntilDetach streams logs for selected services and detaches on signal.
-func (c *ComposeClient) streamLogsUntilDetach(ctx context.Context, projectName string, services []string, opts UpOptions) error {
-	if len(services) == 0 {
-		return nil
+// resolveServiceImages completes the build phase before any service starts.
+func (c *ComposeClient) resolveServiceImages(ctx context.Context, project *types.Project, services []string, forceBuild bool, output io.Writer) error {
+	if forceBuild {
+		return c.buildProject(ctx, project, BuildOptions{Services: services, Output: output})
 	}
 
-	output := opts.Output
+	for _, serviceName := range services {
+		svc, err := project.GetService(serviceName)
+		if err != nil {
+			return err
+		}
+		if svc.Build == nil {
+			continue
+		}
+
+		image := svc.Image
+		if image == "" {
+			image = containerName(project.Name, serviceName)
+		}
+		exists, err := c.containerClient.Images.Exists(ctx, image)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			if err := c.buildService(ctx, project, serviceName, svc, output); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+type serviceLogSession struct {
+	client *ComposeClient
+	ctx    context.Context
+	cancel context.CancelFunc
+	writer io.Writer
+	errCh  chan error
+	wg     sync.WaitGroup
+}
+
+func newServiceLogSession(client *ComposeClient, ctx context.Context, output io.Writer, serviceCount int) *serviceLogSession {
 	if output == nil {
 		output = io.Discard
 	}
-
 	streamCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	errCh := make(chan error, len(services))
-	var wg sync.WaitGroup
-	sharedWriter := &synchronizedWriter{w: output}
-
-	for _, serviceName := range services {
-		containerID := containerName(projectName, serviceName)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			prefixed := newPrefixedWriter(sharedWriter, "["+serviceName+"] ")
-			_, err := c.containerClient.Container.Logs(streamCtx, container.LogsOptions{
-				Follow: true,
-				IDs:    []string{containerID},
-			}, prefixed)
-			if err != nil && !errors.Is(err, context.Canceled) {
-				errCh <- err
-			}
-		}()
+	return &serviceLogSession{
+		client: client,
+		ctx:    streamCtx,
+		cancel: cancel,
+		writer: &synchronizedWriter{w: output},
+		errCh:  make(chan error, serviceCount),
 	}
+}
+
+// Start begins following one service as soon as it has been started.
+func (s *serviceLogSession) Start(projectName, serviceName string) {
+	containerID := containerName(projectName, serviceName)
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		prefixed := newPrefixedWriter(s.writer, "["+serviceName+"] ")
+		if err := s.followServiceLogs(containerID, prefixed); err != nil && !errors.Is(err, context.Canceled) {
+			s.errCh <- err
+		}
+	}()
+}
+
+// Wait streams logs until context cancellation, detach, or a stream error.
+func (s *serviceLogSession) Wait(detach <-chan struct{}) error {
+	defer s.cancel()
 
 	select {
-	case <-ctx.Done():
-		cancel()
-	case err := <-errCh:
-		cancel()
-		wg.Wait()
+	case <-s.ctx.Done():
+	case err := <-s.errCh:
+		s.cancel()
+		s.wg.Wait()
 		return err
-	case <-opts.Detach:
-		cancel()
+	case <-detach:
 	}
 
-	wg.Wait()
+	s.wg.Wait()
 	return nil
+}
+
+func (s *serviceLogSession) followServiceLogs(containerID string, output io.Writer) error {
+	const retryDelay = 100 * time.Millisecond
+
+	for {
+		_, err := s.client.containerClient.Container.Logs(s.ctx, container.LogsOptions{
+			Follow: true,
+			IDs:    []string{containerID},
+		}, output)
+		if s.ctx.Err() != nil {
+			return s.ctx.Err()
+		}
+		if err != nil && !isNotFoundLikeError(err) {
+			return err
+		}
+
+		timer := time.NewTimer(retryDelay)
+		select {
+		case <-s.ctx.Done():
+			timer.Stop()
+			return s.ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 type synchronizedWriter struct {
