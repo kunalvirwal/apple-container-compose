@@ -2,8 +2,11 @@ package container
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -31,6 +34,13 @@ type ListOptions struct {
 	Quiet bool
 }
 
+// ContainerSummary is the information returned for a container by the list
+// command.
+type ContainerSummary struct {
+	ID     string
+	Labels map[string]string
+}
+
 // List returns a list of containers based on the provided options
 func (c *ContainerClient) List(ctx context.Context, opts ListOptions) (string, error) {
 	args := []string{"list"}
@@ -51,6 +61,36 @@ func (c *ContainerClient) List(ctx context.Context, opts ListOptions) (string, e
 	return out, err
 }
 
+// ListSummaries returns typed container metadata from the list command.
+func (c *ContainerClient) ListSummaries(ctx context.Context, opts ListOptions) ([]ContainerSummary, error) {
+	out, err := c.List(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	var response []struct {
+		Configuration struct {
+			ID     string            `json:"id"`
+			Labels map[string]string `json:"labels"`
+		} `json:"configuration"`
+	}
+	if err := json.Unmarshal([]byte(out), &response); err != nil {
+		return nil, fmt.Errorf("decode container list output: %w", err)
+	}
+
+	summaries := make([]ContainerSummary, 0, len(response))
+	for _, item := range response {
+		if item.Configuration.ID == "" {
+			continue
+		}
+		summaries = append(summaries, ContainerSummary{
+			ID:     item.Configuration.ID,
+			Labels: item.Configuration.Labels,
+		})
+	}
+	return summaries, nil
+}
+
 // CreateOptions defines the options for creating a container
 type CreateOptions struct {
 	// Name of the container to create
@@ -65,6 +105,8 @@ type CreateOptions struct {
 	Publish []PortMapping
 	// Environment variables in KEY=VALUE (or KEY) format.
 	Environment []string
+	// Labels associates metadata with the container as KEY=VALUE pairs.
+	Labels map[string]string
 	// Container init Process arguments, if any
 	Arguments []string
 }
@@ -116,6 +158,19 @@ func (c *ContainerClient) Run(ctx context.Context, image string, opts CreateOpti
 				continue
 			}
 			args = append(args, "--env", entry)
+		}
+	}
+	if len(opts.Labels) > 0 {
+		keys := make([]string, 0, len(opts.Labels))
+		for key := range opts.Labels {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			if strings.TrimSpace(key) == "" {
+				return false, ErrInvalidOptions
+			}
+			args = append(args, "--label", key+"="+opts.Labels[key])
 		}
 	}
 	if opts.Publish != nil {

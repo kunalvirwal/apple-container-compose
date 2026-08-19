@@ -65,6 +65,11 @@ uses dependency order; teardown uses its reverse. Container names currently
 follow `<project>_<service>_1` and must stay consistent across up, logs, and
 down.
 
+Compose-created containers carry the `io.github.kunalvirwal.acc.project` and
+`io.github.kunalvirwal.acc.service` labels. `Down` must discover containers by
+these labels: remove current-file services by default and include removed
+services only with `--remove-orphans`.
+
 The implementation intentionally supports only a subset of Compose. Check the
 conversion code in `up.go` and `build.go` before assuming a field is honored.
 

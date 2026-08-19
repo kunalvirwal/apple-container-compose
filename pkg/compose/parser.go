@@ -9,10 +9,12 @@ import (
 // ParseOptions configures compose parsing behavior.
 type ParseOptions struct {
 	// WorkingDir is used for resolving relative paths and environment files.
-	// Defaults to the compose file's directory when empty.
+	// Defaults to the compose file's directory when empty. It does not change
+	// the default project name.
 	WorkingDir string
-	// ProjectName sets the compose project name. When empty, compose-go derives
-	// it from the project directory.
+	// ProjectName overrides the Compose project name. When empty, the top-level
+	// Compose name is used when present; otherwise the compose file's parent
+	// directory name is used.
 	ProjectName string
 	// Environment provides additional variables used during interpolation.
 	Environment map[string]string

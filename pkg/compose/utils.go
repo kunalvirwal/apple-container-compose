@@ -2,8 +2,14 @@ package compose
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/compose-spec/compose-go/v2/types"
+)
+
+const (
+	accProjectLabel = "io.github.kunalvirwal.acc.project"
+	accServiceLabel = "io.github.kunalvirwal.acc.service"
 )
 
 // containerName returns the deterministic container name used for a service.
@@ -47,7 +53,12 @@ func visitService(project *types.Project, name string, state map[string]int, ord
 	}
 
 	state[name] = 1
+	dependencies := make([]string, 0, len(svc.DependsOn))
 	for depName := range svc.DependsOn {
+		dependencies = append(dependencies, depName)
+	}
+	sort.Strings(dependencies)
+	for _, depName := range dependencies {
 		if err := visitService(project, depName, state, order); err != nil {
 			return err
 		}

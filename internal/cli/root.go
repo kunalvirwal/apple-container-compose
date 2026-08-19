@@ -94,7 +94,9 @@ func newUpCommand(rootOpts *rootOptions, newClient composeClientFactory) *cobra.
 }
 
 func newDownCommand(rootOpts *rootOptions, newClient composeClientFactory) *cobra.Command {
-	return &cobra.Command{
+	var removeOrphans bool
+
+	cmd := &cobra.Command{
 		Use:   "down [SERVICE...]",
 		Short: "Stop and remove services",
 		RunE: func(cmd *cobra.Command, services []string) error {
@@ -102,9 +104,14 @@ func newDownCommand(rootOpts *rootOptions, newClient composeClientFactory) *cobr
 			if err != nil {
 				return err
 			}
-			return client.Down(cmd.Context(), path, parseOpts, compose.DownOptions{Services: services})
+			return client.Down(cmd.Context(), path, parseOpts, compose.DownOptions{
+				Services:      services,
+				RemoveOrphans: removeOrphans,
+			})
 		},
 	}
+	cmd.Flags().BoolVar(&removeOrphans, "remove-orphans", false, "Remove containers for services not declared in the Compose file")
+	return cmd
 }
 
 func newBuildCommand(rootOpts *rootOptions, newClient composeClientFactory) *cobra.Command {

@@ -2,8 +2,11 @@ package compose
 
 import (
 	"context"
+	"fmt"
+	"sort"
 	"strings"
 
+	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/kunalvirwal/apple-container-compose/pkg/container"
 )
 
@@ -11,11 +14,14 @@ import (
 type DownOptions struct {
 	// Services limits teardown to selected services. Empty means all services.
 	Services []string
+	// RemoveOrphans also removes project containers whose service is no longer
+	// declared in the current Compose file.
+	RemoveOrphans bool
 	// Force forces container deletion when supported by the runtime.
 	Force bool
 }
 
-// Down stops and removes service containers in reverse dependency order.
+// Down stops and removes labeled project containers in reverse dependency order.
 func (c *ComposeClient) Down(ctx context.Context, path string, parseOpts ParseOptions, opts DownOptions) error {
 	if c.containerClient == nil {
 		return ErrContainerClientNil
@@ -26,16 +32,17 @@ func (c *ComposeClient) Down(ctx context.Context, path string, parseOpts ParseOp
 		return err
 	}
 
-	services, err := generateServiceOrder(project, opts.Services)
+	services, err := generateDownServiceOrder(project, opts.Services)
 	if err != nil {
 		return err
 	}
 
-	ids := make([]string, 0, len(services))
-	for i := len(services) - 1; i >= 0; i-- {
-		ids = append(ids, containerName(project.Name, services[i]))
+	containers, err := c.containerClient.Container.ListSummaries(ctx, container.ListOptions{All: true})
+	if err != nil {
+		return err
 	}
 
+	ids := downContainerIDs(project, services, containers, opts.RemoveOrphans)
 	if len(ids) == 0 {
 		return nil
 	}
@@ -53,6 +60,156 @@ func (c *ComposeClient) Down(ctx context.Context, path string, parseOpts ParseOp
 	}
 
 	return nil
+}
+
+// generateDownServiceOrder returns selected services and their transitive
+// dependents in dependency order. Reversing this order tears down dependents
+// before the services they rely on.
+func generateDownServiceOrder(project *types.Project, selected []string) ([]string, error) {
+	if len(selected) == 0 {
+		return generateServiceOrder(project, nil)
+	}
+
+	dependents := make(map[string][]string, len(project.Services))
+	for _, serviceName := range project.ServiceNames() {
+		service, err := project.GetService(serviceName)
+		if err != nil {
+			return nil, err
+		}
+		for dependencyName := range service.DependsOn {
+			dependents[dependencyName] = append(dependents[dependencyName], serviceName)
+		}
+	}
+	for dependencyName := range dependents {
+		sort.Strings(dependents[dependencyName])
+	}
+
+	selectedSet := make(map[string]struct{})
+	var selectDependents func(string) error
+	selectDependents = func(serviceName string) error {
+		if _, ok := selectedSet[serviceName]; ok {
+			return nil
+		}
+		if _, err := project.GetService(serviceName); err != nil {
+			return fmt.Errorf("%w: %s", ErrServiceNotFound, serviceName)
+		}
+		selectedSet[serviceName] = struct{}{}
+		for _, dependentName := range dependents[serviceName] {
+			if err := selectDependents(dependentName); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, serviceName := range selected {
+		if err := selectDependents(serviceName); err != nil {
+			return nil, err
+		}
+	}
+
+	serviceNames := make([]string, 0, len(selectedSet))
+	for serviceName := range selectedSet {
+		serviceNames = append(serviceNames, serviceName)
+	}
+	sort.Strings(serviceNames)
+
+	state := make(map[string]int, len(serviceNames))
+	order := make([]string, 0, len(serviceNames))
+	var visit func(string) error
+	visit = func(serviceName string) error {
+		if state[serviceName] == 2 {
+			return nil
+		}
+		if state[serviceName] == 1 {
+			return fmt.Errorf("cyclic dependency detected at service %q", serviceName)
+		}
+
+		service, err := project.GetService(serviceName)
+		if err != nil {
+			return err
+		}
+		state[serviceName] = 1
+		dependencies := make([]string, 0, len(service.DependsOn))
+		for dependencyName := range service.DependsOn {
+			if _, ok := selectedSet[dependencyName]; ok {
+				dependencies = append(dependencies, dependencyName)
+			}
+		}
+		sort.Strings(dependencies)
+		for _, dependencyName := range dependencies {
+			if err := visit(dependencyName); err != nil {
+				return err
+			}
+		}
+		state[serviceName] = 2
+		order = append(order, serviceName)
+		return nil
+	}
+	for _, serviceName := range serviceNames {
+		if err := visit(serviceName); err != nil {
+			return nil, err
+		}
+	}
+	return order, nil
+}
+
+func downContainerIDs(project *types.Project, services []string, containers []container.ContainerSummary, removeOrphans bool) []string {
+	activeServices := make(map[string]struct{}, len(project.Services))
+	for serviceName := range project.Services {
+		activeServices[serviceName] = struct{}{}
+	}
+
+	requestedServices := make(map[string]struct{}, len(services))
+	for _, serviceName := range services {
+		requestedServices[serviceName] = struct{}{}
+	}
+
+	ranks := make(map[string]int, len(services))
+	for i := len(services) - 1; i >= 0; i-- {
+		ranks[services[i]] = len(services) - 1 - i
+	}
+
+	type candidate struct {
+		id      string
+		service string
+		rank    int
+	}
+	candidates := make([]candidate, 0, len(containers))
+	for _, item := range containers {
+		if item.Labels[accProjectLabel] != project.Name {
+			continue
+		}
+
+		serviceName := item.Labels[accServiceLabel]
+		_, isActive := activeServices[serviceName]
+		_, isRequested := requestedServices[serviceName]
+		isOrphan := !isActive
+		if !isRequested && !(removeOrphans && isOrphan) {
+			continue
+		}
+
+		rank, ok := ranks[serviceName]
+		if !ok {
+			rank = len(services)
+		}
+		candidates = append(candidates, candidate{id: item.ID, service: serviceName, rank: rank})
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].rank != candidates[j].rank {
+			return candidates[i].rank < candidates[j].rank
+		}
+		if candidates[i].service != candidates[j].service {
+			return candidates[i].service < candidates[j].service
+		}
+		return candidates[i].id < candidates[j].id
+	})
+
+	ids := make([]string, 0, len(candidates))
+	for _, item := range candidates {
+		ids = append(ids, item.id)
+	}
+	return ids
 }
 
 // isNotFoundLikeError normalizes runtime errors for idempotent down operations.

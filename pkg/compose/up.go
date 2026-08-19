@@ -14,7 +14,6 @@ import (
 	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/kunalvirwal/apple-container-compose/pkg/container"
 )
-
 // UpOptions controls compose up behavior.
 type UpOptions struct {
 	// Services limits startup to the selected services. Empty means all services.
@@ -76,7 +75,7 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 			image = containerName(project.Name, serviceName)
 		}
 		name := containerName(project.Name, serviceName)
-		createOpts, err := toCreateOptions(svc, name)
+		createOpts, err := toCreateOptions(svc, project.Name, serviceName, name)
 		if err != nil {
 			return err
 		}
@@ -244,11 +243,15 @@ func (w *prefixedWriter) Write(p []byte) (int, error) {
 }
 
 // toCreateOptions converts compose service run-time settings into container create options.
-func toCreateOptions(service types.ServiceConfig, name string) (container.CreateOptions, error) {
+func toCreateOptions(service types.ServiceConfig, projectName, serviceName, name string) (container.CreateOptions, error) {
 	createOpts := container.CreateOptions{
 		Name:        name,
 		Environment: serviceEnvironmentToList(service.Environment),
-		Arguments:   shellCommandToArgs(service.Command),
+		Labels: map[string]string{
+			accProjectLabel: projectName,
+			accServiceLabel: serviceName,
+		},
+		Arguments: shellCommandToArgs(service.Command),
 	}
 
 	if service.CPUS > 0 {
