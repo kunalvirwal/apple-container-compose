@@ -14,6 +14,7 @@ import (
 	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/kunalvirwal/apple-container-compose/pkg/container"
 )
+
 // UpOptions controls compose up behavior.
 type UpOptions struct {
 	// Services limits startup to the selected services. Empty means all services.
@@ -56,6 +57,9 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 	if err := c.resolveServiceImages(ctx, project, services, opts.Build, buildOutput); err != nil {
 		return err
 	}
+	if err := prepareServiceBindMounts(project, services); err != nil {
+		return err
+	}
 	var logSession *serviceLogSession
 	if opts.Attach {
 		logSession = newServiceLogSession(c, ctx, opts.Output, len(services))
@@ -75,7 +79,7 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 			image = containerName(project.Name, serviceName)
 		}
 		name := containerName(project.Name, serviceName)
-		createOpts, err := toCreateOptions(svc, project.Name, serviceName, name)
+		createOpts, err := toCreateOptions(project.WorkingDir, svc, project.Name, serviceName, name)
 		if err != nil {
 			return err
 		}
@@ -243,7 +247,12 @@ func (w *prefixedWriter) Write(p []byte) (int, error) {
 }
 
 // toCreateOptions converts compose service run-time settings into container create options.
-func toCreateOptions(service types.ServiceConfig, projectName, serviceName, name string) (container.CreateOptions, error) {
+func toCreateOptions(workingDir string, service types.ServiceConfig, projectName, serviceName, name string) (container.CreateOptions, error) {
+	mounts, err := bindMountsForService(workingDir, service)
+	if err != nil {
+		return container.CreateOptions{}, err
+	}
+
 	createOpts := container.CreateOptions{
 		Name:        name,
 		Environment: serviceEnvironmentToList(service.Environment),
@@ -251,6 +260,7 @@ func toCreateOptions(service types.ServiceConfig, projectName, serviceName, name
 			accProjectLabel: projectName,
 			accServiceLabel: serviceName,
 		},
+		Mounts:    mounts,
 		Arguments: shellCommandToArgs(service.Command),
 	}
 

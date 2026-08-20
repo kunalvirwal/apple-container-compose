@@ -70,6 +70,13 @@ Compose-created containers carry the `io.github.kunalvirwal.acc.project` and
 these labels: remove current-file services by default and include removed
 services only with `--remove-orphans`.
 
+Bind mounts map to `container run --mount type=bind,...`. Resolve relative
+sources against the Compose project directory before passing their absolute
+paths to the runtime; targets must be absolute container paths. Create a
+missing source directory only when `bind.create_host_path` is true (the Compose
+default); otherwise fail before starting any containers. Emit `readonly` only
+for a read-only mount.
+
 The implementation intentionally supports only a subset of Compose. Check the
 conversion code in `up.go` and `build.go` before assuming a field is honored.
 

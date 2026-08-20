@@ -10,6 +10,8 @@ services:
     image: my-app:latest
     build:
       context: ./examples
+    volumes:
+      - ./test:/app/test:rw
     ports:
       - "8081:80"
     environment:

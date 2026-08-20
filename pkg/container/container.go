@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -107,8 +108,30 @@ type CreateOptions struct {
 	Environment []string
 	// Labels associates metadata with the container as KEY=VALUE pairs.
 	Labels map[string]string
+	// Mounts configures filesystem mounts for the container.
+	Mounts []Mount
 	// Container init Process arguments, if any
 	Arguments []string
+}
+
+// MountType identifies the storage backing used by a container mount.
+type MountType string
+
+const (
+	// MountTypeBind shares a host directory with a container.
+	MountTypeBind MountType = "bind"
+)
+
+// Mount configures one filesystem mount for a container.
+type Mount struct {
+	// Type identifies the storage backing for the mount.
+	Type MountType
+	// Source is the absolute host path for a bind mount.
+	Source string
+	// Target is the absolute path where the mount appears in the container.
+	Target string
+	// ReadOnly prevents writes through the mount.
+	ReadOnly bool
 }
 
 // PortMapping defines a mapping from a host port to a container port as taken by the container cli
@@ -173,6 +196,13 @@ func (c *ContainerClient) Run(ctx context.Context, image string, opts CreateOpti
 			args = append(args, "--label", key+"="+opts.Labels[key])
 		}
 	}
+	for _, mount := range opts.Mounts {
+		mountSpec, err := mount.spec()
+		if err != nil {
+			return false, err
+		}
+		args = append(args, "--mount", mountSpec)
+	}
 	if opts.Publish != nil {
 		for _, mapping := range opts.Publish {
 			portMapping := ""
@@ -204,6 +234,18 @@ func (c *ContainerClient) Run(ctx context.Context, image string, opts CreateOpti
 		}
 	}
 	return true, err
+}
+
+func (m Mount) spec() (string, error) {
+	if m.Type != MountTypeBind || !filepath.IsAbs(m.Source) || !filepath.IsAbs(m.Target) {
+		return "", ErrInvalidOptions
+	}
+
+	spec := "type=" + string(m.Type) + ",source=" + m.Source + ",target=" + m.Target
+	if m.ReadOnly {
+		spec += ",readonly"
+	}
+	return spec, nil
 }
 
 // LogsOptions defines options for streaming or fetching container logs.
