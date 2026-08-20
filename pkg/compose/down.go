@@ -46,6 +46,21 @@ func (c *ComposeClient) Down(ctx context.Context, path string, parseOpts ParseOp
 	}
 
 	ids := downContainerIDs(project, services, containers, opts.RemoveOrphans)
+	attachedVolumeNames := make(map[string]struct{})
+	if opts.Volumes && len(opts.Services) == 0 && len(ids) > 0 {
+		details, err := c.containerClient.Container.InspectDetails(ctx, ids)
+		if err != nil {
+			if !isNotFoundLikeError(err) {
+				return err
+			}
+		} else {
+			for _, item := range details {
+				for _, name := range item.VolumeNames {
+					attachedVolumeNames[name] = struct{}{}
+				}
+			}
+		}
+	}
 	if len(ids) > 0 {
 		if _, err := c.containerClient.Container.Stop(ctx, container.StopOptions{IDs: ids}); err != nil {
 			if !isNotFoundLikeError(err) {
@@ -61,7 +76,7 @@ func (c *ComposeClient) Down(ctx context.Context, path string, parseOpts ParseOp
 	}
 
 	if opts.Volumes && len(opts.Services) == 0 {
-		if err := c.removeProjectVolumes(ctx, project.Name); err != nil {
+		if err := c.removeProjectVolumes(ctx, project.Name, attachedVolumeNames); err != nil {
 			return err
 		}
 	}
@@ -69,7 +84,11 @@ func (c *ComposeClient) Down(ctx context.Context, path string, parseOpts ParseOp
 	return nil
 }
 
-func (c *ComposeClient) removeProjectVolumes(ctx context.Context, projectName string) error {
+// removeProjectVolumes removes all project-managed named volumes plus the
+// explicitly-created anonymous volumes mounted by containers removed in this
+// Down invocation. Detached anonymous volumes are retained: without their
+// former container there is no safe association with this teardown.
+func (c *ComposeClient) removeProjectVolumes(ctx context.Context, projectName string, attachedVolumeNames map[string]struct{}) error {
 	volumes, err := c.containerClient.Volumes.ListSummaries(ctx)
 	if err != nil {
 		return err
@@ -77,9 +96,15 @@ func (c *ComposeClient) removeProjectVolumes(ctx context.Context, projectName st
 
 	names := make([]string, 0)
 	for _, volume := range volumes {
-		if volume.Labels[accProjectLabel] == projectName && volume.Labels[accVolumeLabel] != "" {
-			names = append(names, volume.Name)
+		if volume.Labels[accProjectLabel] != projectName || volume.Labels[accVolumeLabel] == "" {
+			continue
 		}
+		if isAnonymousVolume(projectName, volume) {
+			if _, attached := attachedVolumeNames[volume.Name]; !attached {
+				continue
+			}
+		}
+		names = append(names, volume.Name)
 	}
 	sort.Strings(names)
 	if len(names) == 0 {
@@ -89,6 +114,11 @@ func (c *ComposeClient) removeProjectVolumes(ctx context.Context, projectName st
 		return err
 	}
 	return nil
+}
+
+func isAnonymousVolume(projectName string, volume container.VolumeSummary) bool {
+	prefix := "acc-" + projectName + "-anon-"
+	return strings.HasPrefix(volume.Name, prefix) && volume.Labels[accVolumeLabel] == volume.Name
 }
 
 // generateDownServiceOrder returns selected services and their transitive

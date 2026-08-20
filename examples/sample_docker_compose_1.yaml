@@ -12,13 +12,16 @@ services:
       context: ./examples
     volumes:
       # - ./test:/app/test:ro
-      - data:/app/data
+      # - data:/app/data
+      - /app/data
     ports:
       - "8081:80"
     environment:
       PORT: 80
 
-volumes:
-  data:
+# volumes:
+#   data:
+#     external: true
+#     name: demo_data
 
 

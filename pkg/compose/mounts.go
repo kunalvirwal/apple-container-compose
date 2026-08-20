@@ -2,6 +2,8 @@ package compose
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -33,12 +35,13 @@ func prepareServiceBindMounts(project *types.Project, services []string) error {
 	return nil
 }
 
-func mountsForService(project *types.Project, service types.ServiceConfig) ([]container.Mount, error) {
+func mountsForService(project *types.Project, service types.ServiceConfig, anonymousSources []string) ([]container.Mount, error) {
 	if len(service.Volumes) == 0 {
 		return nil, nil
 	}
 
 	mounts := make([]container.Mount, 0, len(service.Volumes))
+	anonymousIndex := 0
 	for _, volume := range service.Volumes {
 		var (
 			mount container.Mount
@@ -48,7 +51,15 @@ func mountsForService(project *types.Project, service types.ServiceConfig) ([]co
 		case types.VolumeTypeBind:
 			mount, err = bindMountFromVolume(project.WorkingDir, service.Name, volume)
 		case types.VolumeTypeVolume:
-			mount, err = namedVolumeMount(project, service.Name, volume)
+			anonymousSource := ""
+			if volume.Source == "" {
+				if anonymousIndex >= len(anonymousSources) {
+					return nil, fmt.Errorf("anonymous volume for service %q was not prepared", service.Name)
+				}
+				anonymousSource = anonymousSources[anonymousIndex]
+				anonymousIndex++
+			}
+			mount, err = namedVolumeMount(project, service.Name, volume, anonymousSource)
 		default:
 			err = fmt.Errorf("%w: service %q volume type %q", ErrUnsupportedFeature, service.Name, volume.Type)
 		}
@@ -66,36 +77,47 @@ func validateServiceMounts(project *types.Project, services []string) error {
 		if err != nil {
 			return err
 		}
-		if _, err := mountsForService(project, service); err != nil {
-			return err
+		for _, volume := range service.Volumes {
+			switch volume.Type {
+			case types.VolumeTypeBind:
+				if _, err := bindMountFromVolume(project.WorkingDir, service.Name, volume); err != nil {
+					return err
+				}
+			case types.VolumeTypeVolume:
+				if err := validateServiceVolume(project, service.Name, volume); err != nil {
+					return err
+				}
+			default:
+				return fmt.Errorf("%w: service %q volume type %q", ErrUnsupportedFeature, service.Name, volume.Type)
+			}
 		}
 	}
 	return nil
 }
 
-func prepareNamedVolumes(ctx context.Context, project *types.Project, services []string, client *container.VolumeClient, onWarning func(string)) error {
+func prepareNamedVolumes(ctx context.Context, project *types.Project, services []string, client *container.VolumeClient, onWarning func(string), existingAnonymousServices map[string]bool) (map[string][]string, error) {
 	volumeNames, err := referencedNamedVolumes(project, services)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, volumeName := range volumeNames {
 		volume := project.Volumes[volumeName]
 		runtimeName := composeVolumeName(project, volumeName, volume)
 		summary, exists, err := client.InspectSummary(ctx, runtimeName)
 		if err != nil {
-			return fmt.Errorf("inspect volume %q: %w", runtimeName, err)
+			return nil, fmt.Errorf("inspect volume %q: %w", runtimeName, err)
 		}
 		if volume.External {
 			if !exists {
-				return fmt.Errorf("external volume %q does not exist", runtimeName)
+				return nil, fmt.Errorf("external volume %q does not exist", runtimeName)
 			}
 			continue
 		}
 		if volume.Driver != "" && volume.Driver != "local" {
-			return fmt.Errorf("%w: volume %q driver %q", ErrUnsupportedFeature, volumeName, volume.Driver)
+			return nil, fmt.Errorf("%w: volume %q driver %q", ErrUnsupportedFeature, volumeName, volume.Driver)
 		}
 		if err := validateVolumeDriverOptions(volumeName, volume.DriverOpts); err != nil {
-			return err
+			return nil, err
 		}
 
 		if exists {
@@ -114,10 +136,43 @@ func prepareNamedVolumes(ctx context.Context, project *types.Project, services [
 			Labels:  labels,
 			Options: volume.DriverOpts,
 		}); err != nil {
-			return fmt.Errorf("create volume %q: %w", runtimeName, err)
+			return nil, fmt.Errorf("create volume %q: %w", runtimeName, err)
 		}
 	}
-	return nil
+
+	anonymousSources := make(map[string][]string)
+	for _, serviceName := range services {
+		service, err := project.GetService(serviceName)
+		if err != nil {
+			return nil, err
+		}
+		for _, volume := range service.Volumes {
+			if volume.Type != types.VolumeTypeVolume || volume.Source != "" {
+				continue
+			}
+			if existingAnonymousServices[serviceName] {
+				continue
+			}
+			if err := validateServiceVolume(project, serviceName, volume); err != nil {
+				return nil, err
+			}
+			runtimeName, err := anonymousVolumeName(project.Name)
+			if err != nil {
+				return nil, err
+			}
+			if _, err := client.Create(ctx, container.VolumeCreateOptions{
+				Name: runtimeName,
+				Labels: map[string]string{
+					accProjectLabel: project.Name,
+					accVolumeLabel:  runtimeName,
+				},
+			}); err != nil {
+				return nil, fmt.Errorf("create anonymous volume %q: %w", runtimeName, err)
+			}
+			anonymousSources[serviceName] = append(anonymousSources[serviceName], runtimeName)
+		}
+	}
+	return anonymousSources, nil
 }
 
 func warnUnmanagedVolume(onWarning func(string), projectName, volumeName, runtimeName string, summary container.VolumeSummary) {
@@ -142,9 +197,9 @@ func referencedNamedVolumes(project *types.Project, services []string) ([]string
 				continue
 			}
 			if volume.Source == "" {
-				return nil, fmt.Errorf("%w: anonymous volume for service %q", ErrUnsupportedFeature, serviceName)
+				continue
 			}
-			if _, err := namedVolumeMount(project, serviceName, volume); err != nil {
+			if err := validateServiceVolume(project, serviceName, volume); err != nil {
 				return nil, err
 			}
 			names[volume.Source] = struct{}{}
@@ -159,23 +214,43 @@ func referencedNamedVolumes(project *types.Project, services []string) ([]string
 	return result, nil
 }
 
-func namedVolumeMount(project *types.Project, serviceName string, volume types.ServiceVolumeConfig) (container.Mount, error) {
+func namedVolumeMount(project *types.Project, serviceName string, volume types.ServiceVolumeConfig, anonymousSource string) (container.Mount, error) {
+	if err := validateServiceVolume(project, serviceName, volume); err != nil {
+		return container.Mount{}, err
+	}
 	if volume.Source == "" {
-		return container.Mount{}, fmt.Errorf("%w: anonymous volume for service %q", ErrUnsupportedFeature, serviceName)
+		if anonymousSource == "" {
+			return container.Mount{}, fmt.Errorf("anonymous volume for service %q was not prepared", serviceName)
+		}
+		return container.Mount{
+			Type:     container.MountTypeVolume,
+			Source:   anonymousSource,
+			Target:   filepath.Clean(volume.Target),
+			ReadOnly: volume.ReadOnly,
+		}, nil
 	}
-	definition, ok := project.Volumes[volume.Source]
-	if !ok {
-		return container.Mount{}, fmt.Errorf("%w: service %q references undefined volume %q", ErrUnsupportedFeature, serviceName, volume.Source)
-	}
-	if !filepath.IsAbs(volume.Target) {
-		return container.Mount{}, fmt.Errorf("service %q volume target %q must be an absolute path", serviceName, volume.Target)
-	}
+	definition := project.Volumes[volume.Source]
 	return container.Mount{
 		Type:     container.MountTypeVolume,
 		Source:   composeVolumeName(project, volume.Source, definition),
 		Target:   filepath.Clean(volume.Target),
 		ReadOnly: volume.ReadOnly,
 	}, nil
+}
+
+func validateServiceVolume(project *types.Project, serviceName string, volume types.ServiceVolumeConfig) error {
+	if volume.Volume != nil && (volume.Volume.NoCopy || volume.Volume.Subpath != "" || len(volume.Volume.Labels) > 0) {
+		return fmt.Errorf("%w: service %q volume options", ErrUnsupportedFeature, serviceName)
+	}
+	if volume.Source != "" {
+		if _, ok := project.Volumes[volume.Source]; !ok {
+			return fmt.Errorf("%w: service %q references undefined volume %q", ErrUnsupportedFeature, serviceName, volume.Source)
+		}
+	}
+	if !filepath.IsAbs(volume.Target) {
+		return fmt.Errorf("service %q volume target %q must be an absolute path", serviceName, volume.Target)
+	}
+	return nil
 }
 
 func composeVolumeName(project *types.Project, volumeName string, volume types.VolumeConfig) string {
@@ -192,6 +267,14 @@ func validateVolumeDriverOptions(volumeName string, options types.Options) error
 		}
 	}
 	return nil
+}
+
+func anonymousVolumeName(projectName string) (string, error) {
+	bytes := make([]byte, 16)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", fmt.Errorf("generate anonymous volume name: %w", err)
+	}
+	return "acc-" + projectName + "-anon-" + hex.EncodeToString(bytes), nil
 }
 
 func bindMountFromVolume(workingDir, serviceName string, volume types.ServiceVolumeConfig) (container.Mount, error) {

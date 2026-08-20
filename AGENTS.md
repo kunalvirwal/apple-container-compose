@@ -84,6 +84,14 @@ volumes carry the `io.github.kunalvirwal.acc.project` and
 `io.github.kunalvirwal.acc.volume` labels. Retain them on `down` by default and
 remove only these labeled volumes with `down --volumes`.
 
+Anonymous service volumes (for example `- /cache`) are also created explicitly
+so they can carry ACC ownership labels. Name them
+`acc-<project>-anon-<uuid>` and set the volume label to
+the generated volume name before mounting them. Do not rely on Apple's automatic
+anonymous-volume creation because it cannot attach ACC labels. With
+`down --volumes`, remove only anonymous volumes attached to containers that
+this invocation removes; retain detached anonymous volumes.
+
 The implementation intentionally supports only a subset of Compose. Check the
 conversion code in `up.go` and `build.go` before assuming a field is honored.
 

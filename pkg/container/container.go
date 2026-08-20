@@ -42,6 +42,13 @@ type ContainerSummary struct {
 	Labels map[string]string
 }
 
+// ContainerDetails is the container metadata needed by higher-level clients
+// after inspecting a container.
+type ContainerDetails struct {
+	ID          string
+	VolumeNames []string
+}
+
 // List returns a list of containers based on the provided options
 func (c *ContainerClient) List(ctx context.Context, opts ListOptions) (string, error) {
 	args := []string{"list"}
@@ -90,6 +97,68 @@ func (c *ContainerClient) ListSummaries(ctx context.Context, opts ListOptions) (
 		})
 	}
 	return summaries, nil
+}
+
+// InspectDetails returns the names of volumes mounted by the requested
+// containers. It intentionally exposes only the typed metadata needed by the
+// compose layer rather than the runtime's full inspect response.
+func (c *ContainerClient) InspectDetails(ctx context.Context, ids []string) ([]ContainerDetails, error) {
+	if len(ids) == 0 {
+		return nil, ErrInvalidOptions
+	}
+
+	out, err := c.run(ctx, append([]string{"inspect"}, ids...)...)
+	if err != nil {
+		if strings.Contains(out, "XPC connection error") {
+			return nil, ErrSystemNotRunning
+		}
+		if out != "" {
+			return nil, fmt.Errorf("inspect containers: %w: %s", err, out)
+		}
+		return nil, err
+	}
+
+	var response []struct {
+		ID            string `json:"id"`
+		Configuration struct {
+			ID     string `json:"id"`
+			Mounts []struct {
+				Type json.RawMessage `json:"type"`
+			} `json:"mounts"`
+		} `json:"configuration"`
+	}
+	if err := json.Unmarshal([]byte(out), &response); err != nil {
+		return nil, fmt.Errorf("decode container inspect output: %w", err)
+	}
+
+	details := make([]ContainerDetails, 0, len(response))
+	for _, item := range response {
+		id := item.Configuration.ID
+		if id == "" {
+			id = item.ID
+		}
+		if id == "" {
+			continue
+		}
+
+		volumeNames := make([]string, 0)
+		for _, mount := range item.Configuration.Mounts {
+			var filesystemType struct {
+				Volume struct {
+					Name string `json:"name"`
+				} `json:"volume"`
+			}
+			if err := json.Unmarshal(mount.Type, &filesystemType); err != nil {
+				return nil, fmt.Errorf("decode container inspect mount for %q: %w", id, err)
+			}
+			if filesystemType.Volume.Name != "" {
+				volumeNames = append(volumeNames, filesystemType.Volume.Name)
+			}
+		}
+		sort.Strings(volumeNames)
+		details = append(details, ContainerDetails{ID: id, VolumeNames: volumeNames})
+	}
+	return details, nil
 }
 
 // CreateOptions defines the options for creating a container

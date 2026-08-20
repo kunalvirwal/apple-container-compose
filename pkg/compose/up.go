@@ -66,7 +66,12 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 	if err := prepareServiceBindMounts(project, services); err != nil {
 		return err
 	}
-	if err := prepareNamedVolumes(ctx, project, services, &c.containerClient.Volumes, opts.OnWarning); err != nil {
+	existingAnonymousServices, err := c.existingAnonymousServices(ctx, project, services)
+	if err != nil {
+		return err
+	}
+	anonymousSources, err := prepareNamedVolumes(ctx, project, services, &c.containerClient.Volumes, opts.OnWarning, existingAnonymousServices)
+	if err != nil {
 		return err
 	}
 	var logSession *serviceLogSession
@@ -88,7 +93,13 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 			image = containerName(project.Name, serviceName)
 		}
 		name := containerName(project.Name, serviceName)
-		createOpts, err := toCreateOptions(project, svc, project.Name, serviceName, name)
+		if existingAnonymousServices[serviceName] {
+			if logSession != nil {
+				logSession.Start(project.Name, serviceName)
+			}
+			continue
+		}
+		createOpts, err := toCreateOptions(project, svc, project.Name, serviceName, name, anonymousSources[serviceName])
 		if err != nil {
 			return err
 		}
@@ -108,6 +119,41 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 	}
 
 	return nil
+}
+
+func (c *ComposeClient) existingAnonymousServices(ctx context.Context, project *types.Project, services []string) (map[string]bool, error) {
+	candidates := make(map[string]struct{})
+	for _, serviceName := range services {
+		service, err := project.GetService(serviceName)
+		if err != nil {
+			return nil, err
+		}
+		for _, volume := range service.Volumes {
+			if volume.Type == types.VolumeTypeVolume && volume.Source == "" {
+				candidates[serviceName] = struct{}{}
+				break
+			}
+		}
+	}
+	if len(candidates) == 0 {
+		return map[string]bool{}, nil
+	}
+
+	containers, err := c.containerClient.Container.ListSummaries(ctx, container.ListOptions{All: true})
+	if err != nil {
+		return nil, err
+	}
+	existing := make(map[string]bool)
+	for _, item := range containers {
+		if item.Labels[accProjectLabel] != project.Name {
+			continue
+		}
+		serviceName := item.Labels[accServiceLabel]
+		if _, ok := candidates[serviceName]; ok {
+			existing[serviceName] = true
+		}
+	}
+	return existing, nil
 }
 
 // resolveServiceImages completes the build phase before any service starts.
@@ -256,8 +302,8 @@ func (w *prefixedWriter) Write(p []byte) (int, error) {
 }
 
 // toCreateOptions converts compose service run-time settings into container create options.
-func toCreateOptions(project *types.Project, service types.ServiceConfig, projectName, serviceName, name string) (container.CreateOptions, error) {
-	mounts, err := mountsForService(project, service)
+func toCreateOptions(project *types.Project, service types.ServiceConfig, projectName, serviceName, name string, anonymousSources []string) (container.CreateOptions, error) {
+	mounts, err := mountsForService(project, service, anonymousSources)
 	if err != nil {
 		return container.CreateOptions{}, err
 	}
