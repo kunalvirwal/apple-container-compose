@@ -8,8 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/compose-spec/compose-go/v2/types"
+	units "github.com/docker/go-units"
 	"github.com/kunalvirwal/apple-container-compose/pkg/container"
 )
 
@@ -36,11 +39,11 @@ func prepareServiceBindMounts(project *types.Project, services []string) error {
 }
 
 func mountsForService(project *types.Project, service types.ServiceConfig, anonymousSources []string) ([]container.Mount, error) {
-	if len(service.Volumes) == 0 {
+	if len(service.Volumes) == 0 && len(service.Tmpfs) == 0 {
 		return nil, nil
 	}
 
-	mounts := make([]container.Mount, 0, len(service.Volumes))
+	mounts := make([]container.Mount, 0, len(service.Volumes)+len(service.Tmpfs))
 	anonymousIndex := 0
 	for _, volume := range service.Volumes {
 		var (
@@ -60,6 +63,8 @@ func mountsForService(project *types.Project, service types.ServiceConfig, anony
 				anonymousIndex++
 			}
 			mount, err = namedVolumeMount(project, service.Name, volume, anonymousSource)
+		case types.VolumeTypeTmpfs:
+			mount, err = tmpfsMount(service.Name, volume)
 		default:
 			err = fmt.Errorf("%w: service %q volume type %q", ErrUnsupportedFeature, service.Name, volume.Type)
 		}
@@ -68,31 +73,359 @@ func mountsForService(project *types.Project, service types.ServiceConfig, anony
 		}
 		mounts = append(mounts, mount)
 	}
+	shortTmpfsMounts, err := tmpfsShorthandMounts(service.Name, service.Tmpfs, nil)
+	if err != nil {
+		return nil, err
+	}
+	mounts = append(mounts, shortTmpfsMounts...)
 	return mounts, nil
 }
 
-func validateServiceMounts(project *types.Project, services []string) error {
+func validateServiceMounts(project *types.Project, services []string, onWarning, onFatalWarning func(string)) error {
+	if err := validateShortSyntaxVolumeOptions(project, services, onFatalWarning); err != nil {
+		return err
+	}
 	for _, serviceName := range services {
 		service, err := project.GetService(serviceName)
 		if err != nil {
 			return err
 		}
+		if len(service.VolumesFrom) > 0 {
+			return fatalUnsupportedFeature(onFatalWarning, fmt.Sprintf("service %q volumes_from is not supported by ACC, please define volume mounts separately", service.Name))
+		}
 		for _, volume := range service.Volumes {
+			warnUnsupportedConsistency(service.Name, volume, onWarning)
+			warnUnsupportedBindSELinux(service.Name, volume, onWarning)
+			if err := validateBindMountFeatures(service.Name, volume, onFatalWarning); err != nil {
+				return err
+			}
 			switch volume.Type {
 			case types.VolumeTypeBind:
 				if _, err := bindMountFromVolume(project.WorkingDir, service.Name, volume); err != nil {
 					return err
 				}
 			case types.VolumeTypeVolume:
+				if err := validateServiceVolumeFeatures(service.Name, volume, onFatalWarning); err != nil {
+					return err
+				}
 				if err := validateServiceVolume(project, service.Name, volume); err != nil {
 					return err
 				}
+			case types.VolumeTypeTmpfs:
+				if err := validateTmpfsVolume(service.Name, volume, onFatalWarning); err != nil {
+					return err
+				}
 			default:
-				return fmt.Errorf("%w: service %q volume type %q", ErrUnsupportedFeature, service.Name, volume.Type)
+				return fatalUnsupportedFeature(onFatalWarning, fmt.Sprintf("service %q volume type %q is not supported by ACC", service.Name, volume.Type))
+			}
+		}
+		if _, err := tmpfsShorthandMounts(service.Name, service.Tmpfs, onFatalWarning); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateBindMountFeatures(serviceName string, volume types.ServiceVolumeConfig, onFatalWarning func(string)) error {
+	if volume.Bind == nil || volume.Bind.Propagation == "" {
+		return nil
+	}
+	return fatalUnsupportedFeature(onFatalWarning, fmt.Sprintf("service %q bind.propagation %q is not supported by ACC", serviceName, volume.Bind.Propagation))
+}
+
+func validateShortSyntaxVolumeOptions(project *types.Project, services []string, onFatalWarning func(string)) error {
+	selected := make(map[string]struct{}, len(services))
+	for _, serviceName := range services {
+		selected[serviceName] = struct{}{}
+	}
+	for _, composePath := range project.ComposeFiles {
+		document, err := readRawComposeDocument(composePath)
+		if err != nil {
+			return err
+		}
+		for serviceName, rawService := range document.Services {
+			if _, ok := selected[serviceName]; !ok {
+				continue
+			}
+			for _, rawVolume := range rawService.Volumes {
+				definition, ok := rawVolume.(string)
+				if !ok {
+					continue
+				}
+				for _, option := range shortSyntaxVolumeOptions(definition) {
+					if isSupportedShortSyntaxVolumeOption(option) {
+						continue
+					}
+					return fatalUnsupportedFeature(onFatalWarning, fmt.Sprintf("service %q volume option %q is not supported by ACC", serviceName, option))
+				}
 			}
 		}
 	}
 	return nil
+}
+
+func isSupportedShortSyntaxVolumeOption(option string) bool {
+	switch option {
+	case "ro", "rw", "nocopy", "cached", "delegated", "consistent",
+		types.PropagationRPrivate, types.PropagationPrivate, types.PropagationRShared,
+		types.PropagationShared, types.PropagationRSlave, types.PropagationSlave,
+		types.SELinuxShared, types.SELinuxPrivate:
+		return true
+	default:
+		return false
+	}
+}
+
+func warnUnsupportedConsistency(serviceName string, volume types.ServiceVolumeConfig, onWarning func(string)) {
+	if onWarning == nil || volume.Consistency == "" {
+		return
+	}
+	onWarning(fmt.Sprintf("service %q volume consistency %q is not supported by ACC and will be ignored", serviceName, volume.Consistency))
+}
+
+func warnUnsupportedBindSELinux(serviceName string, volume types.ServiceVolumeConfig, onWarning func(string)) {
+	if onWarning == nil || volume.Bind == nil || volume.Bind.SELinux == "" {
+		return
+	}
+	onWarning(fmt.Sprintf("service %q bind.selinux %q is not supported by ACC and will be ignored", serviceName, volume.Bind.SELinux))
+}
+
+func validateProjectVolumeLabels(project *types.Project, services []string, onFatalWarning func(string)) error {
+	volumeNames, err := referencedNamedVolumes(project, services)
+	if err != nil {
+		return err
+	}
+	for _, volumeName := range volumeNames {
+		volume := project.Volumes[volumeName]
+		if volume.Driver != "" && volume.Driver != "local" {
+			return fatalUnsupportedFeature(onFatalWarning, fmt.Sprintf("volume %q driver %q is not supported by ACC; only the local driver is supported", volumeName, volume.Driver))
+		}
+		if err := validateVolumeDriverOptions(volumeName, volume.DriverOpts, onFatalWarning); err != nil {
+			return err
+		}
+		if _, err := configuredVolumeLabels(project, volumeName, onFatalWarning); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateSharedNamedVolumes(project *types.Project, onFatalWarning func(string)) error {
+	type usage struct {
+		readOnly bool
+	}
+	uses := make(map[string]map[string]usage)
+	for _, serviceName := range project.ServiceNames() {
+		service, err := project.GetService(serviceName)
+		if err != nil {
+			return err
+		}
+		for _, volume := range service.Volumes {
+			if volume.Type != types.VolumeTypeVolume || volume.Source == "" {
+				continue
+			}
+			if err := validateServiceVolumeFeatures(serviceName, volume, onFatalWarning); err != nil {
+				return err
+			}
+			if err := validateServiceVolume(project, serviceName, volume); err != nil {
+				return err
+			}
+			if uses[volume.Source] == nil {
+				uses[volume.Source] = make(map[string]usage)
+			}
+			current, exists := uses[volume.Source][serviceName]
+			if !exists {
+				uses[volume.Source][serviceName] = usage{readOnly: volume.ReadOnly}
+				continue
+			}
+			uses[volume.Source][serviceName] = usage{readOnly: current.readOnly && volume.ReadOnly}
+		}
+	}
+
+	volumeNames := make([]string, 0, len(uses))
+	for volumeName := range uses {
+		volumeNames = append(volumeNames, volumeName)
+	}
+	sort.Strings(volumeNames)
+	for _, volumeName := range volumeNames {
+		serviceUses := uses[volumeName]
+		if len(serviceUses) < 2 {
+			continue
+		}
+		for _, use := range serviceUses {
+			if !use.readOnly {
+				return fatalUnsupportedFeature(onFatalWarning, fmt.Sprintf("named volume %q is mounted by multiple services, but Apple Container only supports read-only shared named volumes; use a bind mount for shared writable storage", volumeName))
+			}
+		}
+	}
+	return nil
+}
+
+func validateServiceVolumeFeatures(serviceName string, volume types.ServiceVolumeConfig, onFatalWarning func(string)) error {
+	if volume.Volume == nil {
+		return nil
+	}
+	if volume.Volume.NoCopy {
+		return fatalUnsupportedFeature(onFatalWarning, fmt.Sprintf("service %q volume.nocopy is not supported by ACC", serviceName))
+	}
+	if volume.Volume.Subpath != "" {
+		return fatalUnsupportedFeature(onFatalWarning, fmt.Sprintf("service %q volume.subpath is not supported by ACC", serviceName))
+	}
+	keys := make([]string, 0, len(volume.Volume.Labels))
+	for key := range volume.Volume.Labels {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if isACCVolumeLabel(key) {
+			return fatalUnsupportedFeature(onFatalWarning, fmt.Sprintf("service %q volume label %q is reserved for ACC", serviceName, key))
+		}
+	}
+	return nil
+}
+
+func configuredVolumeLabels(project *types.Project, volumeName string, onFatalWarning func(string)) (map[string]string, error) {
+	labels := make(map[string]string)
+	volume := project.Volumes[volumeName]
+	if err := mergeVolumeLabels(labels, volumeName, volume.Labels, onFatalWarning); err != nil {
+		return nil, err
+	}
+	for _, serviceName := range project.ServiceNames() {
+		service, err := project.GetService(serviceName)
+		if err != nil {
+			return nil, err
+		}
+		for _, serviceVolume := range service.Volumes {
+			if serviceVolume.Type != types.VolumeTypeVolume || serviceVolume.Source != volumeName || serviceVolume.Volume == nil {
+				continue
+			}
+			if err := mergeVolumeLabels(labels, volumeName, serviceVolume.Volume.Labels, onFatalWarning); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return labels, nil
+}
+
+func mergeVolumeLabels(destination map[string]string, volumeName string, source map[string]string, onFatalWarning func(string)) error {
+	keys := make([]string, 0, len(source))
+	for key := range source {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if isACCVolumeLabel(key) {
+			return fatalUnsupportedFeature(onFatalWarning, fmt.Sprintf("volume %q label %q is reserved for ACC", volumeName, key))
+		}
+		value := source[key]
+		if existing, exists := destination[key]; exists && existing != value {
+			return fatalUnsupportedFeature(onFatalWarning, fmt.Sprintf("volume %q label %q has conflicting values %q and %q", volumeName, key, existing, value))
+		}
+		destination[key] = value
+	}
+	return nil
+}
+
+func isACCVolumeLabel(key string) bool {
+	return key == accProjectLabel || key == accVolumeLabel
+}
+
+func tmpfsMount(serviceName string, volume types.ServiceVolumeConfig) (container.Mount, error) {
+	if err := validateTmpfsVolume(serviceName, volume, nil); err != nil {
+		return container.Mount{}, err
+	}
+
+	mount := container.Mount{
+		Type:     container.MountTypeTmpfs,
+		Target:   filepath.Clean(volume.Target),
+		ReadOnly: volume.ReadOnly,
+	}
+	if volume.Tmpfs != nil {
+		mount.TmpfsSize = uint64(volume.Tmpfs.Size)
+		if volume.Tmpfs.Mode != 0 {
+			mount.TmpfsMode = strconv.FormatUint(uint64(volume.Tmpfs.Mode), 10)
+		}
+	}
+	return mount, nil
+}
+
+func tmpfsShorthandMounts(serviceName string, definitions types.StringList, onFatalWarning func(string)) ([]container.Mount, error) {
+	mounts := make([]container.Mount, 0, len(definitions))
+	for _, definition := range definitions {
+		mount, err := tmpfsShorthandMount(serviceName, definition, onFatalWarning)
+		if err != nil {
+			return nil, err
+		}
+		mounts = append(mounts, mount)
+	}
+	return mounts, nil
+}
+
+func tmpfsShorthandMount(serviceName, definition string, onFatalWarning func(string)) (container.Mount, error) {
+	target, options, hasOptions := strings.Cut(definition, ":")
+	if !filepath.IsAbs(target) {
+		return container.Mount{}, fmt.Errorf("service %q tmpfs target %q must be an absolute path", serviceName, target)
+	}
+
+	mount := container.Mount{Type: container.MountTypeTmpfs, Target: filepath.Clean(target)}
+	if !hasOptions || options == "" {
+		return mount, nil
+	}
+	for _, option := range strings.Split(options, ",") {
+		option = strings.TrimSpace(option)
+		key, value, hasValue := strings.Cut(option, "=")
+		switch key {
+		case "ro":
+			if hasValue {
+				return container.Mount{}, fmt.Errorf("%w: service %q tmpfs option %q must not have a value", ErrUnsupportedFeature, serviceName, key)
+			}
+			mount.ReadOnly = true
+		case "rw":
+			if hasValue {
+				return container.Mount{}, fmt.Errorf("%w: service %q tmpfs option %q must not have a value", ErrUnsupportedFeature, serviceName, key)
+			}
+			mount.ReadOnly = false
+		case "size":
+			if !hasValue || value == "" {
+				return container.Mount{}, fatalUnsupportedFeature(onFatalWarning, fmt.Sprintf("service %q tmpfs size must have a value", serviceName))
+			}
+			size, err := units.RAMInBytes(value)
+			if err != nil || size < 0 {
+				return container.Mount{}, fatalUnsupportedFeature(onFatalWarning, fmt.Sprintf("service %q tmpfs size %q is invalid", serviceName, value))
+			}
+			mount.TmpfsSize = uint64(size)
+		case "mode":
+			if !hasValue || value == "" {
+				return container.Mount{}, fatalUnsupportedFeature(onFatalWarning, fmt.Sprintf("service %q tmpfs mode must have a value", serviceName))
+			}
+			if _, err := strconv.ParseUint(value, 8, 32); err != nil {
+				return container.Mount{}, fatalUnsupportedFeature(onFatalWarning, fmt.Sprintf("service %q tmpfs mode %q is invalid", serviceName, value))
+			}
+			mount.TmpfsMode = value
+		case "uid", "gid", "uuid", "guid":
+			return container.Mount{}, fatalUnsupportedFeature(onFatalWarning, "tmpfs uid/gid ownership is not supported by Apple container")
+		default:
+			return container.Mount{}, fatalUnsupportedFeature(onFatalWarning, fmt.Sprintf("service %q tmpfs option %q is not supported", serviceName, key))
+		}
+	}
+	return mount, nil
+}
+
+func validateTmpfsVolume(serviceName string, volume types.ServiceVolumeConfig, onFatalWarning func(string)) error {
+	if volume.Source != "" {
+		return fatalUnsupportedFeature(onFatalWarning, fmt.Sprintf("service %q tmpfs source is not supported", serviceName))
+	}
+	if !filepath.IsAbs(volume.Target) {
+		return fmt.Errorf("service %q tmpfs target %q must be an absolute path", serviceName, volume.Target)
+	}
+	return nil
+}
+
+func fatalUnsupportedFeature(onFatalWarning func(string), message string) error {
+	if onFatalWarning != nil {
+		onFatalWarning(message)
+	}
+	return fmt.Errorf("%w: %s", ErrUnsupportedFeature, message)
 }
 
 func prepareNamedVolumes(ctx context.Context, project *types.Project, services []string, client *container.VolumeClient, onWarning func(string), existingAnonymousServices map[string]bool) (map[string][]string, error) {
@@ -113,21 +446,14 @@ func prepareNamedVolumes(ctx context.Context, project *types.Project, services [
 			}
 			continue
 		}
-		if volume.Driver != "" && volume.Driver != "local" {
-			return nil, fmt.Errorf("%w: volume %q driver %q", ErrUnsupportedFeature, volumeName, volume.Driver)
-		}
-		if err := validateVolumeDriverOptions(volumeName, volume.DriverOpts); err != nil {
-			return nil, err
-		}
-
 		if exists {
 			warnUnmanagedVolume(onWarning, project.Name, volumeName, runtimeName, summary)
 			continue
 		}
 
-		labels := make(map[string]string, len(volume.Labels)+2)
-		for key, value := range volume.Labels {
-			labels[key] = value
+		labels, err := configuredVolumeLabels(project, volumeName, nil)
+		if err != nil {
+			return nil, err
 		}
 		labels[accProjectLabel] = project.Name
 		labels[accVolumeLabel] = volumeName
@@ -160,12 +486,17 @@ func prepareNamedVolumes(ctx context.Context, project *types.Project, services [
 			if err != nil {
 				return nil, err
 			}
+			labels := make(map[string]string, 2)
+			if volume.Volume != nil {
+				for key, value := range volume.Volume.Labels {
+					labels[key] = value
+				}
+			}
+			labels[accProjectLabel] = project.Name
+			labels[accVolumeLabel] = runtimeName
 			if _, err := client.Create(ctx, container.VolumeCreateOptions{
-				Name: runtimeName,
-				Labels: map[string]string{
-					accProjectLabel: project.Name,
-					accVolumeLabel:  runtimeName,
-				},
+				Name:   runtimeName,
+				Labels: labels,
 			}); err != nil {
 				return nil, fmt.Errorf("create anonymous volume %q: %w", runtimeName, err)
 			}
@@ -182,7 +513,7 @@ func warnUnmanagedVolume(onWarning func(string), projectName, volumeName, runtim
 	if summary.Labels[accProjectLabel] == projectName && summary.Labels[accVolumeLabel] == volumeName {
 		return
 	}
-	onWarning(fmt.Sprintf("Volume %q already exists but is not managed by ACC; it will be mounted, but acc down --volumes will not remove it. Declare it external or recreate it with labels to allow ACC manage it.", runtimeName))
+	onWarning(fmt.Sprintf("Volume %q already exists but is not managed by ACC; it will be mounted, but 'acc down --volumes' will not remove it. Declare it external or recreate it with labels to allow ACC manage it.", runtimeName))
 }
 
 func referencedNamedVolumes(project *types.Project, services []string) ([]string, error) {
@@ -239,7 +570,7 @@ func namedVolumeMount(project *types.Project, serviceName string, volume types.S
 }
 
 func validateServiceVolume(project *types.Project, serviceName string, volume types.ServiceVolumeConfig) error {
-	if volume.Volume != nil && (volume.Volume.NoCopy || volume.Volume.Subpath != "" || len(volume.Volume.Labels) > 0) {
+	if volume.Volume != nil && (volume.Volume.NoCopy || volume.Volume.Subpath != "") {
 		return fmt.Errorf("%w: service %q volume options", ErrUnsupportedFeature, serviceName)
 	}
 	if volume.Source != "" {
@@ -260,13 +591,50 @@ func composeVolumeName(project *types.Project, volumeName string, volume types.V
 	return project.Name + "_" + volumeName
 }
 
-func validateVolumeDriverOptions(volumeName string, options types.Options) error {
-	for option := range options {
-		if option != "size" && option != "journal" {
-			return fmt.Errorf("%w: volume %q driver_opts.%s", ErrUnsupportedFeature, volumeName, option)
+func validateVolumeDriverOptions(volumeName string, options types.Options, onFatalWarning func(string)) error {
+	keys := make([]string, 0, len(options))
+	for key := range options {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		value := options[key]
+		switch key {
+		case "size":
+			if err := validateVolumeSize(value); err != nil {
+				return fatalUnsupportedFeature(onFatalWarning, fmt.Sprintf("volume %q driver_opts.size %q is invalid: %v", volumeName, value, err))
+			}
+		case "journal":
+			if err := validateVolumeJournal(value); err != nil {
+				return fatalUnsupportedFeature(onFatalWarning, fmt.Sprintf("volume %q driver_opts.journal %q is invalid: %v", volumeName, value, err))
+			}
+		default:
+			return fatalUnsupportedFeature(onFatalWarning, fmt.Sprintf("volume %q driver_opts.%s is not supported by ACC", volumeName, key))
 		}
 	}
 	return nil
+}
+
+func validateVolumeSize(value string) error {
+	size, err := units.RAMInBytes(value)
+	if err != nil || size < 1024*1024 {
+		return fmt.Errorf("must be at least 1MiB with an optional K, M, G, T, or P suffix")
+	}
+	return nil
+}
+
+func validateVolumeJournal(value string) error {
+	mode, size, hasSize := strings.Cut(value, ":")
+	if mode != "ordered" && mode != "writeback" && mode != "journal" {
+		return fmt.Errorf("mode must be writeback, ordered, or journal")
+	}
+	if !hasSize {
+		return nil
+	}
+	if size == "" || strings.Contains(size, ":") {
+		return fmt.Errorf("journal size must be specified once after ':'")
+	}
+	return validateVolumeSize(size)
 }
 
 func anonymousVolumeName(projectName string) (string, error) {

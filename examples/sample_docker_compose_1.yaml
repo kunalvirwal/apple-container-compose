@@ -1,27 +1,59 @@
 name: demo
 services:
+
   # web:
   #   image: nginx:latest
   #   ports:
   #     - "8080:80"
   #   environment:
   #     NODE_ENV: ${FOO:-production}
+  #   volumes:
+  #     - data:/app2:ro
+
   web2:
     image: my-app:latest
     build:
       context: ./examples
     volumes:
-      # - ./test:/app/test:ro
+      - ./test:/app/test
+      
       # - data:/app/data
-      - /app/data
+      
+      # - /app/data
+
+      # - type: volume  # bind, volume, tmpfs are supported
+      #   source: data
+      #   target: /app/data
+      #   read_only: false
+      #   volume:
+      #     labels:
+      #       acc.project: demo
+      #       acc.volume: data
+
+      # - type: tmpfs
+      #   target: /cache
+      #   read_only: true
+      #   tmpfs:
+      #     size: 64m
+      #     mode: 1777
+
+    # tmpfs:
+    #   - /cache:ro,mode=755,size=64m  #  uuid and guid are not supported by Apple container
     ports:
       - "8081:80"
     environment:
       PORT: 80
 
-# volumes:
-#   data:
-#     external: true
-#     name: demo_data
+volumes:
+  data:
+    # driver: local  # only local is supported by Apple container
+    # labels:
+      # acc.project: demo2
+      # acc.volume: data
+    # external: true
+    # name: demo_data
+    # driver_opts:
+    #   size: 80m
+    #   journal: journal:64M  # journal, ordered and writeback are supported
 
 

@@ -78,7 +78,8 @@ func newUpCommand(rootOpts *rootOptions, newClient composeClientFactory) *cobra.
 				return err
 			}
 			output := cmd.OutOrStdout()
-			return client.Up(cmd.Context(), path, parseOpts, compose.UpOptions{
+			fatalDiagnosticRendered := false
+			err = client.Up(cmd.Context(), path, parseOpts, compose.UpOptions{
 				Services:    services,
 				Build:       build,
 				Output:      newServiceLogWriter(output, !rootOpts.noColor),
@@ -87,7 +88,15 @@ func newUpCommand(rootOpts *rootOptions, newClient composeClientFactory) *cobra.
 				OnWarning: func(message string) {
 					_ = writeWarning(output, !rootOpts.noColor, message)
 				},
+				OnFatalWarning: func(message string) {
+					fatalDiagnosticRendered = true
+					_ = writeFatalWarning(output, !rootOpts.noColor, message)
+				},
 			})
+			if fatalDiagnosticRendered && err != nil {
+				return markErrorReported(err)
+			}
+			return err
 		},
 	}
 

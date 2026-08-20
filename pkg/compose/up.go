@@ -34,6 +34,10 @@ type UpOptions struct {
 	// OnWarning receives non-fatal Compose warnings. The SDK never renders
 	// warnings itself; callers decide whether and how to present them.
 	OnWarning func(string)
+	// OnFatalWarning receives a diagnostic immediately before Up returns an
+	// error for an unsupported Compose feature. The SDK never renders
+	// diagnostics itself; callers decide whether and how to present them.
+	OnFatalWarning func(string)
 }
 
 // Up brings selected services up in dependency order. It builds missing local
@@ -57,7 +61,13 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 	if err != nil {
 		return err
 	}
-	if err := validateServiceMounts(project, services); err != nil {
+	if err := validateServiceMounts(project, services, opts.OnWarning, opts.OnFatalWarning); err != nil {
+		return err
+	}
+	if err := validateProjectVolumeLabels(project, services, opts.OnFatalWarning); err != nil {
+		return err
+	}
+	if err := validateSharedNamedVolumes(project, opts.OnFatalWarning); err != nil {
 		return err
 	}
 	if err := c.resolveServiceImages(ctx, project, services, opts.Build, buildOutput); err != nil {

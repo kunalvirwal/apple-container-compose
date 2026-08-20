@@ -75,14 +75,39 @@ sources against the Compose project directory before passing their absolute
 paths to the runtime; targets must be absolute container paths. Create a
 missing source directory only when `bind.create_host_path` is true (the Compose
 default); otherwise fail before starting any containers. Emit `readonly` only
-for a read-only mount.
+for a read-only mount. Compose mount `consistency` values cannot be mapped to
+Apple Container, so ignore them and emit a non-fatal warning.
+SELinux bind relabeling (`bind.selinux` or short-syntax `z`/`Z`) is also
+ignored with a non-fatal warning because it has no Apple Container mapping.
+Bind propagation cannot be mapped to Apple Container's VM-backed binds and
+must produce a fatal diagnostic before startup.
+Unknown short-syntax volume options must produce a fatal diagnostic instead of
+being silently ignored by compose-go's normalization.
 
 Named volumes map to `container run --mount type=volume,...`. Create each
 selected, non-external Compose volume before starting containers, using its
 explicit `name:` when set or `<project>_<volume>` otherwise. Project-managed
 volumes carry the `io.github.kunalvirwal.acc.project` and
 `io.github.kunalvirwal.acc.volume` labels. Retain them on `down` by default and
-remove only these labeled volumes with `down --volumes`.
+remove only these labeled volumes with `down --volumes`. Propagate user-defined
+Compose volume labels at creation, but reject either ACC ownership-label key as
+reserved with a fatal diagnostic.
+Merge service-level `volume.labels` into their named volume's labels at
+creation. Reject conflicting values for the same key. For anonymous service
+volumes, apply their `volume.labels` directly. `volume.nocopy` and
+`volume.subpath` are unsupported and must produce a fatal diagnostic before
+startup.
+Only the omitted/default or explicit `local` named-volume driver is supported;
+other driver values must produce a fatal diagnostic before startup.
+For `local`, permit only `driver_opts.size` (at least 1 MiB) and
+`driver_opts.journal` (`ordered`, `writeback`, or `journal`, optionally with a
+valid size suffix); reject every other key or invalid value with a fatal
+diagnostic before startup.
+
+Apple named volumes may be shared only when every service mount is read-only.
+Reject a project where multiple services reference the same named volume and
+any of those mounts is writable; recommend a bind mount for shared writable
+storage.
 
 Anonymous service volumes (for example `- /cache`) are also created explicitly
 so they can carry ACC ownership labels. Name them
@@ -92,8 +117,17 @@ anonymous-volume creation because it cannot attach ACC labels. With
 `down --volumes`, remove only anonymous volumes attached to containers that
 this invocation removes; retain detached anonymous volumes.
 
+Tmpfs mounts map to `container run --mount type=tmpfs,...`, including long-form
+Compose `tmpfs.size` and `tmpfs.mode` and service-level `tmpfs:` shorthand
+size/mode options. Non-fatal diagnostics use
+`UpOptions.OnWarning`; unsupported features that must prevent startup use
+`UpOptions.OnFatalWarning` and return `ErrUnsupportedFeature`.
+
 The implementation intentionally supports only a subset of Compose. Check the
 conversion code in `up.go` and `build.go` before assuming a field is honored.
+`volumes_from` is explicitly unsupported and must produce a fatal diagnostic
+before startup. Service volume types other than `bind`, `volume`, and `tmpfs`
+must do the same.
 
 `Up` has a deliberate image-resolution policy for services with `build:`:
 

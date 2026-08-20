@@ -191,6 +191,8 @@ const (
 	MountTypeBind MountType = "bind"
 	// MountTypeVolume attaches a named volume to a container.
 	MountTypeVolume MountType = "volume"
+	// MountTypeTmpfs attaches an in-memory filesystem to a container.
+	MountTypeTmpfs MountType = "tmpfs"
 )
 
 // Mount configures one filesystem mount for a container.
@@ -198,12 +200,17 @@ type Mount struct {
 	// Type identifies the storage backing for the mount.
 	Type MountType
 	// Source is the absolute host path for a bind mount or a volume name for a
-	// named-volume mount.
+	// named-volume mount. Tmpfs mounts do not have a source.
 	Source string
 	// Target is the absolute path where the mount appears in the container.
 	Target string
 	// ReadOnly prevents writes through the mount.
 	ReadOnly bool
+	// TmpfsSize is the tmpfs capacity in bytes. Zero uses the runtime default.
+	TmpfsSize uint64
+	// TmpfsMode is the tmpfs file mode expressed as an octal Unix-permission
+	// string. An empty value uses the runtime default.
+	TmpfsMode string
 }
 
 // PortMapping defines a mapping from a host port to a container port as taken by the container cli
@@ -309,7 +316,26 @@ func (c *ContainerClient) Run(ctx context.Context, image string, opts CreateOpti
 }
 
 func (m Mount) spec() (string, error) {
-	if !filepath.IsAbs(m.Target) || m.Source == "" {
+	if !filepath.IsAbs(m.Target) {
+		return "", ErrInvalidOptions
+	}
+	if m.Type == MountTypeTmpfs {
+		if m.Source != "" {
+			return "", ErrInvalidOptions
+		}
+		spec := "type=" + string(m.Type) + ",target=" + m.Target
+		if m.TmpfsSize > 0 {
+			spec += ",size=" + strconv.FormatUint(m.TmpfsSize, 10)
+		}
+		if m.TmpfsMode != "" {
+			spec += ",mode=" + m.TmpfsMode
+		}
+		if m.ReadOnly {
+			spec += ",readonly"
+		}
+		return spec, nil
+	}
+	if m.Source == "" {
 		return "", ErrInvalidOptions
 	}
 	if m.Type == MountTypeBind && !filepath.IsAbs(m.Source) {
