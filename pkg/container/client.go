@@ -16,6 +16,7 @@ type Client struct {
 	Container ContainerClient
 	System    SystemClient
 	Images    ImageClient
+	Volumes   VolumeClient
 }
 
 func NewClient() (*Client, error) {
@@ -31,6 +32,7 @@ func NewClient() (*Client, error) {
 	c.Container = NewContainerClient(c.run, c.runStreaming)
 	c.System = NewSystemClient(c.run)
 	c.Images = NewImageClient(c.run, c.runStreaming)
+	c.Volumes = NewVolumeClient(c.run)
 	return c, nil
 }
 

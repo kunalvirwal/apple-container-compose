@@ -77,6 +77,13 @@ missing source directory only when `bind.create_host_path` is true (the Compose
 default); otherwise fail before starting any containers. Emit `readonly` only
 for a read-only mount.
 
+Named volumes map to `container run --mount type=volume,...`. Create each
+selected, non-external Compose volume before starting containers, using its
+explicit `name:` when set or `<project>_<volume>` otherwise. Project-managed
+volumes carry the `io.github.kunalvirwal.acc.project` and
+`io.github.kunalvirwal.acc.volume` labels. Retain them on `down` by default and
+remove only these labeled volumes with `down --volumes`.
+
 The implementation intentionally supports only a subset of Compose. Check the
 conversion code in `up.go` and `build.go` before assuming a field is honored.
 

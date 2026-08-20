@@ -120,13 +120,16 @@ type MountType string
 const (
 	// MountTypeBind shares a host directory with a container.
 	MountTypeBind MountType = "bind"
+	// MountTypeVolume attaches a named volume to a container.
+	MountTypeVolume MountType = "volume"
 )
 
 // Mount configures one filesystem mount for a container.
 type Mount struct {
 	// Type identifies the storage backing for the mount.
 	Type MountType
-	// Source is the absolute host path for a bind mount.
+	// Source is the absolute host path for a bind mount or a volume name for a
+	// named-volume mount.
 	Source string
 	// Target is the absolute path where the mount appears in the container.
 	Target string
@@ -237,7 +240,13 @@ func (c *ContainerClient) Run(ctx context.Context, image string, opts CreateOpti
 }
 
 func (m Mount) spec() (string, error) {
-	if m.Type != MountTypeBind || !filepath.IsAbs(m.Source) || !filepath.IsAbs(m.Target) {
+	if !filepath.IsAbs(m.Target) || m.Source == "" {
+		return "", ErrInvalidOptions
+	}
+	if m.Type == MountTypeBind && !filepath.IsAbs(m.Source) {
+		return "", ErrInvalidOptions
+	}
+	if m.Type != MountTypeBind && m.Type != MountTypeVolume {
 		return "", ErrInvalidOptions
 	}
 

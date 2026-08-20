@@ -10,6 +10,7 @@ import (
 const (
 	accProjectLabel = "io.github.kunalvirwal.acc.project"
 	accServiceLabel = "io.github.kunalvirwal.acc.service"
+	accVolumeLabel  = "io.github.kunalvirwal.acc.volume"
 )
 
 // containerName returns the deterministic container name used for a service.

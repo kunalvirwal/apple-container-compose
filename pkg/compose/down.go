@@ -19,6 +19,9 @@ type DownOptions struct {
 	RemoveOrphans bool
 	// Force forces container deletion when supported by the runtime.
 	Force bool
+	// Volumes removes named volumes created for the project. As with Docker
+	// Compose, named volumes are retained unless this option is set.
+	Volumes bool
 }
 
 // Down stops and removes labeled project containers in reverse dependency order.
@@ -43,22 +46,48 @@ func (c *ComposeClient) Down(ctx context.Context, path string, parseOpts ParseOp
 	}
 
 	ids := downContainerIDs(project, services, containers, opts.RemoveOrphans)
-	if len(ids) == 0 {
+	if len(ids) > 0 {
+		if _, err := c.containerClient.Container.Stop(ctx, container.StopOptions{IDs: ids}); err != nil {
+			if !isNotFoundLikeError(err) {
+				return err
+			}
+		}
+
+		if _, err := c.containerClient.Container.Delete(ctx, container.DeleteOptions{IDs: ids, Force: opts.Force}); err != nil {
+			if !isNotFoundLikeError(err) {
+				return err
+			}
+		}
+	}
+
+	if opts.Volumes && len(opts.Services) == 0 {
+		if err := c.removeProjectVolumes(ctx, project.Name); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (c *ComposeClient) removeProjectVolumes(ctx context.Context, projectName string) error {
+	volumes, err := c.containerClient.Volumes.ListSummaries(ctx)
+	if err != nil {
+		return err
+	}
+
+	names := make([]string, 0)
+	for _, volume := range volumes {
+		if volume.Labels[accProjectLabel] == projectName && volume.Labels[accVolumeLabel] != "" {
+			names = append(names, volume.Name)
+		}
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
 		return nil
 	}
-
-	if _, err := c.containerClient.Container.Stop(ctx, container.StopOptions{IDs: ids}); err != nil {
-		if !isNotFoundLikeError(err) {
-			return err
-		}
+	if _, err := c.containerClient.Volumes.Delete(ctx, container.VolumeDeleteOptions{Names: names}); err != nil && !isNotFoundLikeError(err) {
+		return err
 	}
-
-	if _, err := c.containerClient.Container.Delete(ctx, container.DeleteOptions{IDs: ids, Force: opts.Force}); err != nil {
-		if !isNotFoundLikeError(err) {
-			return err
-		}
-	}
-
 	return nil
 }
 

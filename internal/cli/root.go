@@ -84,6 +84,9 @@ func newUpCommand(rootOpts *rootOptions, newClient composeClientFactory) *cobra.
 				Output:      newServiceLogWriter(output, !rootOpts.noColor),
 				BuildOutput: newBuildLogWriter(output, !rootOpts.noColor),
 				Attach:      !detach,
+				OnWarning: func(message string) {
+					_ = writeWarning(output, !rootOpts.noColor, message)
+				},
 			})
 		},
 	}
@@ -95,6 +98,7 @@ func newUpCommand(rootOpts *rootOptions, newClient composeClientFactory) *cobra.
 
 func newDownCommand(rootOpts *rootOptions, newClient composeClientFactory) *cobra.Command {
 	var removeOrphans bool
+	var volumes bool
 
 	cmd := &cobra.Command{
 		Use:   "down [SERVICE...]",
@@ -107,10 +111,12 @@ func newDownCommand(rootOpts *rootOptions, newClient composeClientFactory) *cobr
 			return client.Down(cmd.Context(), path, parseOpts, compose.DownOptions{
 				Services:      services,
 				RemoveOrphans: removeOrphans,
+				Volumes:       volumes,
 			})
 		},
 	}
 	cmd.Flags().BoolVar(&removeOrphans, "remove-orphans", false, "Remove containers for services not declared in the Compose file")
+	cmd.Flags().BoolVarP(&volumes, "volumes", "v", false, "Remove named volumes declared by the project")
 	return cmd
 }
 

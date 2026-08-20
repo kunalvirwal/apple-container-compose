@@ -9,8 +9,9 @@ import (
 )
 
 const (
-	ansiReset  = "\x1b[0m"
-	ansiPurple = "\x1b[35m"
+	ansiReset        = "\x1b[0m"
+	ansiPurple       = "\x1b[35m"
+	ansiBrightYellow = "\x1b[93m"
 )
 
 var serviceColors = []string{
@@ -35,6 +36,15 @@ func newServiceLogWriter(target io.Writer, enabled bool) io.Writer {
 		return target
 	}
 	return &serviceLogWriter{target: target}
+}
+
+func writeWarning(target io.Writer, enabled bool, message string) error {
+	line := "[Warning]: " + message + "\n"
+	if enabled {
+		line = ansiBrightYellow + line + ansiReset
+	}
+	_, err := io.WriteString(target, line)
+	return err
 }
 
 type colorWriter struct {

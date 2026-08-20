@@ -31,6 +31,9 @@ type UpOptions struct {
 	// Detach, when non-nil, detaches attached log streaming when signaled.
 	// Canceling the context also detaches.
 	Detach <-chan struct{}
+	// OnWarning receives non-fatal Compose warnings. The SDK never renders
+	// warnings itself; callers decide whether and how to present them.
+	OnWarning func(string)
 }
 
 // Up brings selected services up in dependency order. It builds missing local
@@ -54,10 +57,16 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 	if err != nil {
 		return err
 	}
+	if err := validateServiceMounts(project, services); err != nil {
+		return err
+	}
 	if err := c.resolveServiceImages(ctx, project, services, opts.Build, buildOutput); err != nil {
 		return err
 	}
 	if err := prepareServiceBindMounts(project, services); err != nil {
+		return err
+	}
+	if err := prepareNamedVolumes(ctx, project, services, &c.containerClient.Volumes, opts.OnWarning); err != nil {
 		return err
 	}
 	var logSession *serviceLogSession
@@ -79,7 +88,7 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 			image = containerName(project.Name, serviceName)
 		}
 		name := containerName(project.Name, serviceName)
-		createOpts, err := toCreateOptions(project.WorkingDir, svc, project.Name, serviceName, name)
+		createOpts, err := toCreateOptions(project, svc, project.Name, serviceName, name)
 		if err != nil {
 			return err
 		}
@@ -247,8 +256,8 @@ func (w *prefixedWriter) Write(p []byte) (int, error) {
 }
 
 // toCreateOptions converts compose service run-time settings into container create options.
-func toCreateOptions(workingDir string, service types.ServiceConfig, projectName, serviceName, name string) (container.CreateOptions, error) {
-	mounts, err := bindMountsForService(workingDir, service)
+func toCreateOptions(project *types.Project, service types.ServiceConfig, projectName, serviceName, name string) (container.CreateOptions, error) {
+	mounts, err := mountsForService(project, service)
 	if err != nil {
 		return container.CreateOptions{}, err
 	}
