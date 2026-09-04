@@ -61,6 +61,10 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 	if err != nil {
 		return err
 	}
+	networkDefinitions, err := validateNetworks(project, services, opts.OnFatalWarning)
+	if err != nil {
+		return err
+	}
 	if err := validateServiceMounts(project, services, opts.OnWarning, opts.OnFatalWarning); err != nil {
 		return err
 	}
@@ -81,6 +85,10 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 		return err
 	}
 	anonymousSources, err := prepareNamedVolumes(ctx, project, services, &c.containerClient.Volumes, opts.OnWarning, existingAnonymousServices)
+	if err != nil {
+		return err
+	}
+	networkNames, err := c.ensureNetworks(ctx, project, networkDefinitions, opts.OnFatalWarning)
 	if err != nil {
 		return err
 	}
@@ -109,7 +117,7 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 			}
 			continue
 		}
-		createOpts, err := toCreateOptions(project, svc, project.Name, serviceName, name, anonymousSources[serviceName])
+		createOpts, err := toCreateOptions(project, svc, project.Name, serviceName, name, networkNames[serviceName], anonymousSources[serviceName])
 		if err != nil {
 			return err
 		}
@@ -312,7 +320,7 @@ func (w *prefixedWriter) Write(p []byte) (int, error) {
 }
 
 // toCreateOptions converts compose service run-time settings into container create options.
-func toCreateOptions(project *types.Project, service types.ServiceConfig, projectName, serviceName, name string, anonymousSources []string) (container.CreateOptions, error) {
+func toCreateOptions(project *types.Project, service types.ServiceConfig, projectName, serviceName, name string, networkNames, anonymousSources []string) (container.CreateOptions, error) {
 	mounts, err := mountsForService(project, service, anonymousSources)
 	if err != nil {
 		return container.CreateOptions{}, err
@@ -325,6 +333,7 @@ func toCreateOptions(project *types.Project, service types.ServiceConfig, projec
 			accProjectLabel: projectName,
 			accServiceLabel: serviceName,
 		},
+		Networks:  networkNames,
 		Mounts:    mounts,
 		Arguments: shellCommandToArgs(service.Command),
 	}

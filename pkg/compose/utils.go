@@ -8,9 +8,11 @@ import (
 )
 
 const (
-	accProjectLabel = "io.github.kunalvirwal.acc.project"
-	accServiceLabel = "io.github.kunalvirwal.acc.service"
-	accVolumeLabel  = "io.github.kunalvirwal.acc.volume"
+	accProjectLabel        = "io.github.kunalvirwal.acc.project"
+	accServiceLabel        = "io.github.kunalvirwal.acc.service"
+	accVolumeLabel         = "io.github.kunalvirwal.acc.volume"
+	accNetworkLabel        = "io.github.kunalvirwal.acc.network"
+	accNetworkCoreDNSLabel = "io.github.kunalvirwal.acc.network.coredns"
 )
 
 // containerName returns the deterministic container name used for a service.

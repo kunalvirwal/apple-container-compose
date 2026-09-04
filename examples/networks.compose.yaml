@@ -1,0 +1,36 @@
+# Run with: ./acc up --file ./examples/networks.compose.yaml
+name: acc-networks
+
+services:
+  frontend:
+    image: alpine:3.20
+    command: ["sh", "-c", "while true; do echo frontend-ready; sleep 5; done"]
+    networks:
+      - public
+
+  backend:
+    image: alpine:3.20
+    command: ["sh", "-c", "while true; do echo backend-ready; sleep 5; done"]
+    networks:
+      - private
+
+  relay:
+    image: alpine:3.20
+    command: ["sh", "-c", "while true; do echo relay-ready; sleep 5; done"]
+    depends_on:
+      - frontend
+      - backend
+    # ACC passes one --network flag for each listed network.
+    networks:
+      - public
+      - private
+
+networks:
+  # ACC creates these as acc-networks_public and acc-networks_private.
+  public:
+  private:
+
+  # A pre-existing network can be attached without ACC creating or deleting it:
+  # shared:
+  #   external: true
+  #   name: existing-network

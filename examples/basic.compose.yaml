@@ -1,0 +1,11 @@
+# Run with: ./acc up --file ./examples/basic.compose.yaml
+name: acc-basic
+
+services:
+  web:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+    environment:
+      NGINX_ENTRYPOINT_QUIET_LOGS: "0"
+

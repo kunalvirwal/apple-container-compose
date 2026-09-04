@@ -1,0 +1,63 @@
+# Run with: ./acc up --file ./examples/volumes.compose.yaml
+name: acc-volumes
+
+services:
+  app:
+    image: alpine:3.20
+    command: ["sh", "-c", "while true; do echo volume-demo-ready; sleep 5; done"]
+    volumes:
+      # Bind mount: ACC resolves this relative to this file and creates the
+      # directory when it is missing.
+      - type: bind
+        source: ./volume-demo-data
+        target: /host-data
+        bind:
+          create_host_path: true
+
+      # Named volume: ACC creates acc-volumes_app-data and labels it.
+      - type: volume
+        source: app-data
+        target: /var/lib/app
+
+      # Anonymous volume: ACC explicitly creates and labels this volume.
+      - /scratch
+
+      # Tmpfs: size and mode are mapped to Apple Container.
+      - type: tmpfs
+        target: /cache
+        tmpfs:
+          size: 64M
+          mode: 1777
+
+      # Bind alternatives:
+      # - ./volume-demo-data:/host-data:ro
+      # - type: bind
+      #   source: ./volume-demo-data
+      #   target: /host-data
+      #   read_only: true
+      #   consistency: delegated # accepted but ignored with a warning
+
+      # Named-volume alternative:
+      # - app-data:/var/lib/app:ro
+
+      # Tmpfs shorthand alternative:
+      # tmpfs:
+      #   - /cache:size=64M,mode=1777
+
+volumes:
+  app-data:
+    driver: local
+    driver_opts:
+      size: 64M
+      journal: ordered:8M
+    labels:
+      com.example.acc-demo.volume: app-data
+
+    # To use a specific runtime volume name, uncomment:
+    # name: acc-docs-app-data
+
+    # To use a pre-created volume, replace this entire app-data definition
+    # with the following. ACC does not create or delete external volumes:
+    # app-data:
+    #   external: true
+    #   name: existing-volume

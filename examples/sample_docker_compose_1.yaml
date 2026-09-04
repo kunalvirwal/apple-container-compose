@@ -1,23 +1,21 @@
 name: demo
 services:
 
-  # web:
-  #   image: nginx:latest
-  #   ports:
-  #     - "8080:80"
-  #   environment:
-  #     NODE_ENV: ${FOO:-production}
-  #   volumes:
-  #     - data:/app2:ro
+  web:
+    image: nginx:latest
+    ports:
+      - "8080:80"
+    environment:
+      NODE_ENV: ${FOO:-production}
 
   web2:
     image: my-app:latest
     build:
-      context: ./examples
+      context: /Users/kunalvirwal/Desktop/KunalV/JS_Codes/Express-Sample
     volumes:
-      - ./test:/app/test
+      # - ./test:/app/test
       
-      # - data:/app/data
+      - data:/app/data
       
       # - /app/data
 

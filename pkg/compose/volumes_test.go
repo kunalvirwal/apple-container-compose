@@ -860,9 +860,19 @@ services:
 }
 
 func newVolumeTestClient(run func(context.Context, ...string) (string, error)) *ComposeClient {
+	networkRun := func(_ context.Context, args ...string) (string, error) {
+		if len(args) >= 2 && args[0] == "network" && args[1] == "inspect" {
+			return "network not found", errors.New("command failed")
+		}
+		if len(args) >= 2 && args[0] == "network" && args[1] == "list" {
+			return "[]", nil
+		}
+		return "", nil
+	}
 	return &ComposeClient{containerClient: &container.Client{
 		Container: container.NewContainerClient(run, nil),
 		Volumes:   container.NewVolumeClient(run),
+		Networks:  container.NewNetworkClient(networkRun),
 	}}
 }
 

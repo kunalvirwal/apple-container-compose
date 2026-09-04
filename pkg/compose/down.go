@@ -80,8 +80,51 @@ func (c *ComposeClient) Down(ctx context.Context, path string, parseOpts ParseOp
 			return err
 		}
 	}
+	if len(opts.Services) == 0 && !hasRemainingProjectContainers(project.Name, containers, ids) {
+		if err := c.removeProjectNetworks(ctx, project.Name); err != nil {
+			return err
+		}
+	}
 
 	return nil
+}
+
+// removeProjectNetworks removes only networks demonstrably owned by this ACC
+// project. Unlabelled and foreign networks are intentionally left untouched.
+func (c *ComposeClient) removeProjectNetworks(ctx context.Context, projectName string) error {
+	networks, err := c.containerClient.Networks.ListSummaries(ctx)
+	if err != nil {
+		return err
+	}
+	names := make([]string, 0)
+	for _, network := range networks {
+		if network.Labels[accProjectLabel] == projectName && network.Labels[accNetworkLabel] != "" {
+			names = append(names, network.Name)
+		}
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return nil
+	}
+	if _, err := c.containerClient.Networks.Delete(ctx, names); err != nil && !isNotFoundLikeError(err) {
+		return err
+	}
+	return nil
+}
+
+func hasRemainingProjectContainers(projectName string, containers []container.ContainerSummary, removedIDs []string) bool {
+	removed := make(map[string]struct{}, len(removedIDs))
+	for _, id := range removedIDs {
+		removed[id] = struct{}{}
+	}
+	for _, item := range containers {
+		if item.Labels[accProjectLabel] == projectName {
+			if _, willRemove := removed[item.ID]; !willRemove {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // removeProjectVolumes removes all project-managed named volumes plus the

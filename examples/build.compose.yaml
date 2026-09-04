@@ -1,0 +1,10 @@
+# Run with: ./acc up --file ./examples/build.compose.yaml
+# ACC builds this service automatically when acc-build-demo:latest is absent.
+name: acc-build
+
+services:
+  app:
+    image: acc-build-demo:latest
+    build:
+      context: ./build-demo
+

@@ -177,6 +177,8 @@ type CreateOptions struct {
 	Environment []string
 	// Labels associates metadata with the container as KEY=VALUE pairs.
 	Labels map[string]string
+	// Networks identifies the networks to attach when creating the container.
+	Networks []string
 	// Mounts configures filesystem mounts for the container.
 	Mounts []Mount
 	// Container init Process arguments, if any
@@ -274,6 +276,13 @@ func (c *ContainerClient) Run(ctx context.Context, image string, opts CreateOpti
 			}
 			args = append(args, "--label", key+"="+opts.Labels[key])
 		}
+	}
+	for _, networkName := range opts.Networks {
+		networkName = strings.TrimSpace(networkName)
+		if networkName == "" {
+			return false, ErrInvalidOptions
+		}
+		args = append(args, "--network", networkName)
 	}
 	for _, mount := range opts.Mounts {
 		mountSpec, err := mount.spec()

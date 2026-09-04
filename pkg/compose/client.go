@@ -15,5 +15,3 @@ func NewComposeClient() (*ComposeClient, error) {
 	}
 	return &ComposeClient{containerClient: containerClient}, nil
 }
-
-

@@ -70,6 +70,15 @@ Compose-created containers carry the `io.github.kunalvirwal.acc.project` and
 these labels: remove current-file services by default and include removed
 services only with `--remove-orphans`.
 
+`Up` creates plain Compose networks using their Compose-resolved runtime names
+(including the implicit `<project>_default` network), labels them with ACC
+project/network ownership labels and `acc.network.coredns=false`, and attaches each newly-created service
+to every network it declares using repeated `container run --network` flags.
+Advanced network and service-network options must not be silently ignored.
+`Up` must reject an existing project-managed network name unless both ownership
+labels match the project. `Down` removes only matching ACC-owned project
+networks after all project containers have been removed.
+
 Bind mounts map to `container run --mount type=bind,...`. Resolve relative
 sources against the Compose project directory before passing their absolute
 paths to the runtime; targets must be absolute container paths. Create a
