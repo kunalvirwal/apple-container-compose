@@ -1,0 +1,10 @@
+.:53 {
+    # Mount the config directory read-only, not state.json as a single-file bind:
+    # ACC updates state.json by atomic rename.
+    # Do not add a shared cache before acc in compiled plugin order. Standard
+    # cache keys omit requester identity and can expose another network's IPs.
+    acc /config/state.json
+    forward . /etc/resolv.conf
+    log
+    errors
+}
