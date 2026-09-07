@@ -9,11 +9,12 @@ compiled into an ACC CoreDNS image to provide the service-name and alias lookup
 behavior that Compose applications expect.
 
 The plugin is deliberately small. CoreDNS continues to provide DNS transport,
-packet handling, logging, errors, and forwarding. The ACC plugin only decides
-whether a requesting container is allowed to resolve an ACC-managed service
-name and which network-specific address to return.
+packet handling, logging, errors, and the default upstream forwarding path.
+The ACC plugin decides whether a requesting container is allowed to resolve an
+ACC-managed service name, which network-specific address to return, and which
+configured nameserver to use for external names.
 
-Currently `acc` utilises a coredns image with acc plugin built-in, `docker.io/kunalvirwal/acc-coredns:v1`.
+Currently `acc` utilises a coredns image with acc plugin built-in, `docker.io/kunalvirwal/acc-coredns:v2`.
 
 ## How ACC uses the plugin
 
@@ -68,11 +69,11 @@ the file, and a single-file mount can retain the previous inode.
 | Setting | Default | Notes |
 | --- | --- | --- |
 | State file | `/config/state.json` | Set by the bundled Corefile. |
-| Reload interval | 5 second | Reload detection compares modification time. |
+| Reload interval | 5 seconds | Reload detection compares modification time. |
 | DNS TTL | 120 seconds | Used for returned A and AAAA records. |
 | DNS listener | `:53` over UDP and TCP | Set by the bundled Corefile. |
 | Supported answer types | `A`, `AAAA` | Other query types receive NODATA for a visible name. |
-| External names | Forwarded | Names absent from ACC state continue to `forward`. |
+| External names | Forwarded | See [External forwarding](#external-forwarding). |
 | Shared DNS cache | Disabled | See [Caching](#caching). |
 
 ## State format
@@ -86,6 +87,7 @@ The current schema version is `1`.
     {
       "id": "demo_api_1",
       "service": "api",
+      "nameservers": ["1.1.1.1", "9.9.9.9"],
       "networks": {
         "demo_db": {
           "addresses": ["10.10.0.3"]
@@ -106,6 +108,7 @@ The current schema version is `1`.
 | `containers` | Yes | An array; use `[]` for an empty registry. |
 | `containers[].id` | Yes | Unique, stable container identity. Replica containers have distinct IDs. |
 | `containers[].service` | Yes | Compose service name registered on every attached network. |
+| `containers[].nameservers` | No | Ordered, service-specific upstream resolver IPs. |
 | `containers[].networks` | Yes | Map keyed by runtime network identity, not a logical Compose network key. |
 | `addresses` | Yes | One or more unicast IPv4 and/or IPv6 addresses on that network. |
 | `aliases` | No | Additional names scoped only to that network attachment. |
@@ -156,6 +159,30 @@ compatibility.
 IPv4 and IPv6 records can coexist on one attachment. A queries return only
 IPv4 addresses and AAAA queries return only IPv6 addresses.
 
+## External forwarding
+
+Internal discovery is always evaluated first. An ACC-managed name that is not
+visible to the requester returns `NXDOMAIN`; it is never sent to a public
+resolver.
+
+For a name absent from ACC state, the requester-specific `nameservers` list determines
+the forwarding path:
+
+| Requester state | External-name behavior |
+| --- | --- |
+| `nameservers` omitted or empty | Continue to the Corefile's ordinary `forward` plugin (the bundled image uses `/etc/resolv.conf`). |
+| `nameservers` contains resolver IPs | The ACC plugin forwards directly to those resolvers, in listed order. |
+
+Each `nameservers` value must be an unscoped unicast IPv4 or IPv6 address. Hostnames
+and ports are intentionally not accepted; upstream DNS uses port `53`.
+Configured servers are tried in order on transport failure. A normal DNS
+response, including `NXDOMAIN` or `SERVFAIL`, is returned as-is and stops the
+attempt. UDP queries that receive a truncated response are retried over TCP
+against the same server.
+
+ACC will populate this list from a service's Compose `dns` field. `dns_search`
+and `dns_opt` are not represented in this state schema yet.
+
 ## State updates
 
 ACC must update the file safely:
@@ -166,7 +193,7 @@ ACC must update the file safely:
 4. Atomically rename it over `state.json`.
 5. Ensure the replacement has a newer modification time.
 
-The plugin checks `state.json` once per 5 second. On a changed modification time,
+The plugin checks `state.json` every 5 seconds. On a changed modification time,
 it parses and validates the entire file before replacing the in-memory
 registry. Failed reads or invalid JSON leave the previous registry active.
 
@@ -185,7 +212,7 @@ network memberships. A cached answer for one container could therefore expose
 an address to another container that does not share the target's network.
 
 The bundled Corefile does not enable caching. Client-side caching still uses
-the 30-second DNS TTL. A future ACC-aware cache must include requester
+the 120-second DNS TTL. A future ACC-aware cache must include requester
 visibility in its key and invalidate entries when the registry changes.
 
 ## Operations
@@ -199,7 +226,8 @@ The plugin needs a valid initial state before CoreDNS starts:
 After startup, inspect plugin activity with the container runtime's log
 command. A normal startup records an initial state load; replacing the state
 file records a state update. CoreDNS's `log` directive records DNS queries,
-while the ACC plugin records registry load failures and updates.
+while the ACC plugin records registry load failures, updates, and the selected
+upstream nameserver for each dynamically forwarded query.
 
 The nested module can be verified independently:
 
@@ -218,6 +246,9 @@ go vet ./...
   downstream resolver. It never returns an ACC internal address, but the final
   policy for this case is not settled.
 - Only A and AAAA service records are produced.
+- Dynamic upstream forwarding supports configured nameserver IP addresses only;
+  `dns_search`, `dns_opt`, resolver hostnames, and non-default resolver ports
+  are not implemented.
 - Standard shared DNS caching is intentionally unsupported.
 - The plugin does not create networks, start CoreDNS, configure `--dns`, or
   write state. Those responsibilities belong to ACC's pending Compose runtime

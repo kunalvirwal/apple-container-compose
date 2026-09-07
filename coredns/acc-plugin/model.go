@@ -17,9 +17,10 @@ type State struct {
 // Container groups all addresses and networks of one running container.
 // Replicas have distinct IDs and may share a service name.
 type Container struct {
-	ID       string                       `json:"id"`
-	Service  string                       `json:"service"`
-	Networks map[string]NetworkAttachment `json:"networks"`
+	ID          string                       `json:"id"`
+	Service     string                       `json:"service"`
+	Nameservers []string                     `json:"nameservers,omitempty"`
+	Networks    map[string]NetworkAttachment `json:"networks"`
 }
 
 // NetworkAttachment holds addresses and aliases on a runtime network. Its map
@@ -31,9 +32,16 @@ type NetworkAttachment struct {
 }
 
 type snapshot struct {
-	bySourceIP  map[netip.Addr][]string // every network of the requesting container
+	bySourceIP  map[netip.Addr]requester // every network and DNS configuration of the requester
 	byNetwork   map[string]map[string][]netip.Addr
 	managedName map[string]struct{}
+}
+
+// requester holds immutable information selected by a DNS query's source
+// address. Nameservers preserve their configured ordering.
+type requester struct {
+	networks    []string
+	nameservers []netip.Addr
 }
 
 func buildSnapshot(state State) (*snapshot, error) {
@@ -44,7 +52,7 @@ func buildSnapshot(state State) (*snapshot, error) {
 		return nil, fmt.Errorf("containers must be an array; use [] for an empty registry")
 	}
 	s := &snapshot{
-		bySourceIP:  make(map[netip.Addr][]string),
+		bySourceIP:  make(map[netip.Addr]requester),
 		byNetwork:   make(map[string]map[string][]netip.Addr),
 		managedName: make(map[string]struct{}),
 	}
@@ -65,6 +73,10 @@ func buildSnapshot(state State) (*snapshot, error) {
 		if len(container.Networks) == 0 {
 			return nil, fmt.Errorf("container %q has no networks", container.ID)
 		}
+		nameservers, err := parseNameservers(container.Nameservers)
+		if err != nil {
+			return nil, fmt.Errorf("container %q nameservers: %w", container.ID, err)
+		}
 		networks := make([]string, 0, len(container.Networks))
 		for network := range container.Networks {
 			networks = append(networks, network)
@@ -84,7 +96,7 @@ func buildSnapshot(state State) (*snapshot, error) {
 					return nil, fmt.Errorf("address %s belongs to containers %q and %q; source-IP identification requires unique addresses across containers", address, owner, container.ID)
 				}
 				addressOwner[address] = container.ID
-				s.bySourceIP[address] = networks
+				s.bySourceIP[address] = requester{networks: networks, nameservers: nameservers}
 			}
 			names := []string{service}
 			for _, alias := range attachment.Aliases {
@@ -129,6 +141,25 @@ func attachmentAddresses(attachment NetworkAttachment) ([]netip.Addr, error) {
 		addresses = append(addresses, address)
 	}
 	return uniqueAddresses(addresses), nil
+}
+
+func parseNameservers(raw []string) ([]netip.Addr, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	nameservers := make([]netip.Addr, 0, len(raw))
+	for _, value := range raw {
+		address, err := netip.ParseAddr(value)
+		if err != nil || address.Zone() != "" {
+			return nil, fmt.Errorf("invalid unscoped IP address %q", value)
+		}
+		address = address.Unmap()
+		if !address.IsGlobalUnicast() {
+			return nil, fmt.Errorf("nameserver %q must be a unicast address", value)
+		}
+		nameservers = append(nameservers, address)
+	}
+	return nameservers, nil
 }
 
 // normalizeName allows Compose-style underscores and optional dotted names,

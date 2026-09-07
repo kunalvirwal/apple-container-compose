@@ -14,16 +14,18 @@ const defaultTTL uint32 = 120
 
 // ACC is the CoreDNS adapter around the file-backed ACC registry.
 type ACC struct {
-	Next     plugin.Handler
-	Registry *FileRegistry
-	TTL      uint32
+	Next      plugin.Handler
+	Registry  *FileRegistry
+	TTL       uint32
+	forwarder dnsForwarder
 }
 
 // Name implements plugin.Handler.
 func (a *ACC) Name() string { return "acc" }
 
 // ServeDNS resolves ACC-managed names according to the requester's network
-// memberships. Unknown names continue through the normal CoreDNS chain.
+// memberships. Unmanaged names use the requester's configured nameservers or
+// continue through the normal CoreDNS chain.
 func (a *ACC) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	if r == nil || len(r.Question) != 1 {
 		return dns.RcodeFormatError, nil
@@ -45,6 +47,13 @@ func (a *ACC) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (i
 	resolution := a.Registry.Resolve(sourceIP, question.Name)
 	switch resolution.Kind {
 	case ResolutionUnmanaged:
+		if len(resolution.Nameservers) != 0 {
+			forwarder := a.forwarder
+			if forwarder == nil {
+				forwarder = defaultDNSForwarder
+			}
+			return forwarder.Forward(ctx, w, r, resolution.Nameservers)
+		}
 		return plugin.NextOrFailure(a.Name(), a.Next, ctx, w, r)
 	case ResolutionHidden:
 		return writeReply(w, r, dns.RcodeNameError, nil)

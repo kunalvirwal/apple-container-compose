@@ -31,6 +31,8 @@ func TestStateValidation(t *testing.T) {
 		{"bad alias", func(s *State) {
 			s.Containers[0].Networks["db"] = NetworkAttachment{Addresses: []string{"10.10.0.2"}, Aliases: []string{"bad..alias"}}
 		}},
+		{"bad nameserver", func(s *State) { s.Containers[0].Nameservers = []string{"127.0.0.1"} }},
+		{"nameserver port", func(s *State) { s.Containers[0].Nameservers = []string{"1.1.1.1:53"} }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := fixtureState()

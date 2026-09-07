@@ -14,7 +14,7 @@ func fixtureState() State {
 		{ID: "api-1", Service: "api", Networks: map[string]NetworkAttachment{
 			"db":      {Addresses: []string{"10.10.0.3"}},
 			"backend": {Addresses: []string{"10.20.0.3", "fd00:20::3"}, Aliases: []string{"backend-api"}},
-		}},
+		}, Nameservers: []string{"1.1.1.1", "9.9.9.9"}},
 		{ID: "api-2", Service: "api", Networks: map[string]NetworkAttachment{
 			"db":      {Addresses: []string{"10.10.0.4"}},
 			"backend": {Addresses: []string{"10.20.0.4", "fd00:20::4"}, Aliases: []string{"backend-api", "BACKEND-API."}},
@@ -59,6 +59,26 @@ func TestResolve(t *testing.T) {
 				t.Fatalf("addresses=%v want %v", actual, test.addresses)
 			}
 		})
+	}
+}
+
+func TestResolveIncludesRequesterNameservers(t *testing.T) {
+	registry := registryFromState(t, fixtureState())
+	result := registry.Resolve(netip.MustParseAddr("10.10.0.3"), "example.com")
+	if result.Kind != ResolutionUnmanaged {
+		t.Fatalf("kind=%v want unmanaged", result.Kind)
+	}
+	var actual []string
+	for _, address := range result.Nameservers {
+		actual = append(actual, address.String())
+	}
+	want := []string{"1.1.1.1", "9.9.9.9"}
+	if !reflect.DeepEqual(actual, want) {
+		t.Fatalf("nameservers=%v want %v", actual, want)
+	}
+	result.Nameservers[0] = netip.MustParseAddr("8.8.8.8")
+	if got := registry.Resolve(netip.MustParseAddr("10.10.0.3"), "example.com").Nameservers[0].String(); got != "1.1.1.1" {
+		t.Fatalf("Resolve exposed live nameserver state: %s", got)
 	}
 }
 

@@ -9,8 +9,9 @@ import (
 type ResolutionKind uint8
 
 const (
-	// ResolutionUnmanaged means the name is not in ACC state and should be
-	// handed to the next CoreDNS plugin, normally forward.
+	// ResolutionUnmanaged means the name is not in ACC state. A requester with
+	// configured nameservers is forwarded directly; all others continue to the
+	// next CoreDNS plugin, normally forward.
 	ResolutionUnmanaged ResolutionKind = iota
 	// ResolutionAnswer contains one network-scoped record set.
 	ResolutionAnswer
@@ -25,8 +26,9 @@ const (
 
 // Resolution is the CoreDNS-independent result of a source-aware lookup.
 type Resolution struct {
-	Kind      ResolutionKind
-	Addresses []netip.Addr
+	Kind        ResolutionKind
+	Addresses   []netip.Addr
+	Nameservers []netip.Addr
 }
 
 // Resolve applies ACC's network-visibility rule to sourceIP and name.
@@ -39,10 +41,13 @@ func (r *FileRegistry) Resolve(sourceIP netip.Addr, name string) Resolution {
 	if err != nil {
 		return Resolution{Kind: ResolutionUnmanaged}
 	}
+	requester, knownRequester := s.bySourceIP[sourceIP.Unmap()]
 	if _, managed := s.managedName[normalizedName]; !managed {
+		if knownRequester {
+			return Resolution{Kind: ResolutionUnmanaged, Nameservers: slices.Clone(requester.nameservers)}
+		}
 		return Resolution{Kind: ResolutionUnmanaged}
 	}
-	networks, knownRequester := s.bySourceIP[sourceIP.Unmap()]
 	if !knownRequester {
 		return Resolution{Kind: ResolutionUnknownRequester}
 	}
@@ -51,7 +56,7 @@ func (r *FileRegistry) Resolve(sourceIP netip.Addr, name string) Resolution {
 	// interface sent the packet. Choose the first network containing the name;
 	// return all replicas on that network. This is ACC's deterministic tie-break,
 	// not an implementation of Docker's endpoint-priority ordering.
-	for _, network := range networks {
+	for _, network := range requester.networks {
 		records := s.byNetwork[network][normalizedName]
 		if len(records) == 0 {
 			continue
