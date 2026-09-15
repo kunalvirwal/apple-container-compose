@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -47,6 +48,15 @@ type ContainerSummary struct {
 type ContainerDetails struct {
 	ID          string
 	VolumeNames []string
+	Networks    []NetworkAttachment
+}
+
+// NetworkAttachment describes a container's assigned addresses on one runtime
+// network. Addresses do not include the CIDR prefixes reported by the
+// container CLI's inspect output.
+type NetworkAttachment struct {
+	Name      string
+	Addresses []netip.Addr
 }
 
 // List returns a list of containers based on the provided options
@@ -126,6 +136,13 @@ func (c *ContainerClient) InspectDetails(ctx context.Context, ids []string) ([]C
 				Type json.RawMessage `json:"type"`
 			} `json:"mounts"`
 		} `json:"configuration"`
+		Status struct {
+			Networks []struct {
+				Network     string `json:"network"`
+				IPv4Address string `json:"ipv4Address"`
+				IPv6Address string `json:"ipv6Address"`
+			} `json:"networks"`
+		} `json:"status"`
 	}
 	if err := json.Unmarshal([]byte(out), &response); err != nil {
 		return nil, fmt.Errorf("decode container inspect output: %w", err)
@@ -156,9 +173,76 @@ func (c *ContainerClient) InspectDetails(ctx context.Context, ids []string) ([]C
 			}
 		}
 		sort.Strings(volumeNames)
-		details = append(details, ContainerDetails{ID: id, VolumeNames: volumeNames})
+		networks, err := decodeNetworkAttachments(item.Status.Networks)
+		if err != nil {
+			return nil, fmt.Errorf("decode container inspect networks for %q: %w", id, err)
+		}
+		details = append(details, ContainerDetails{ID: id, VolumeNames: volumeNames, Networks: networks})
 	}
 	return details, nil
+}
+
+func decodeNetworkAttachments(raw []struct {
+	Network     string `json:"network"`
+	IPv4Address string `json:"ipv4Address"`
+	IPv6Address string `json:"ipv6Address"`
+}) ([]NetworkAttachment, error) {
+	byName := make(map[string][]netip.Addr, len(raw))
+	for _, attachment := range raw {
+		name := strings.TrimSpace(attachment.Network)
+		if name == "" {
+			return nil, fmt.Errorf("network attachment has no network name")
+		}
+		for _, rawAddress := range []string{attachment.IPv4Address, attachment.IPv6Address} {
+			if strings.TrimSpace(rawAddress) == "" {
+				continue
+			}
+			address, err := inspectAddress(rawAddress)
+			if err != nil {
+				return nil, fmt.Errorf("network %q: %w", name, err)
+			}
+			byName[name] = append(byName[name], address)
+		}
+	}
+
+	names := make([]string, 0, len(byName))
+	for name := range byName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	attachments := make([]NetworkAttachment, 0, len(names))
+	for _, name := range names {
+		addresses := byName[name]
+		sort.Slice(addresses, func(i, j int) bool { return addresses[i].Compare(addresses[j]) < 0 })
+		addresses = deduplicateAddresses(addresses)
+		attachments = append(attachments, NetworkAttachment{Name: name, Addresses: addresses})
+	}
+	return attachments, nil
+}
+
+func inspectAddress(raw string) (netip.Addr, error) {
+	value := strings.TrimSpace(raw)
+	if prefix, err := netip.ParsePrefix(value); err == nil {
+		return prefix.Addr().Unmap(), nil
+	}
+	address, err := netip.ParseAddr(value)
+	if err != nil || address.Zone() != "" {
+		return netip.Addr{}, fmt.Errorf("invalid IP address %q", raw)
+	}
+	return address.Unmap(), nil
+}
+
+func deduplicateAddresses(addresses []netip.Addr) []netip.Addr {
+	if len(addresses) < 2 {
+		return addresses
+	}
+	result := addresses[:1]
+	for _, address := range addresses[1:] {
+		if address != result[len(result)-1] {
+			result = append(result, address)
+		}
+	}
+	return result
 }
 
 // CreateOptions defines the options for creating a container
@@ -177,6 +261,9 @@ type CreateOptions struct {
 	Environment []string
 	// Labels associates metadata with the container as KEY=VALUE pairs.
 	Labels map[string]string
+	// Nameservers identifies DNS server IP addresses to pass through repeated
+	// --dns flags. Their order is preserved.
+	Nameservers []string
 	// Networks identifies the networks to attach when creating the container.
 	Networks []string
 	// Mounts configures filesystem mounts for the container.
@@ -256,6 +343,13 @@ func (c *ContainerClient) Run(ctx context.Context, image string, opts CreateOpti
 	if opts.Rm {
 		args = append(args, "--rm")
 	}
+	nameservers, err := NormalizeNameservers(opts.Nameservers)
+	if err != nil {
+		return false, err
+	}
+	for _, nameserver := range nameservers {
+		args = append(args, "--dns", nameserver)
+	}
 	if len(opts.Environment) > 0 {
 		for _, entry := range opts.Environment {
 			if strings.TrimSpace(entry) == "" {
@@ -322,6 +416,28 @@ func (c *ContainerClient) Run(ctx context.Context, image string, opts CreateOpti
 		}
 	}
 	return true, err
+}
+
+// NormalizeNameservers validates literal DNS server addresses and returns their
+// canonical string forms. Loopback, unspecified, multicast, and link-local
+// addresses cannot identify a nameserver reachable from another container.
+func NormalizeNameservers(raw []string) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	nameservers := make([]string, 0, len(raw))
+	for _, value := range raw {
+		address, err := netip.ParseAddr(strings.TrimSpace(value))
+		if err != nil || address.Zone() != "" {
+			return nil, fmt.Errorf("%w: invalid nameserver %q", ErrInvalidOptions, value)
+		}
+		address = address.Unmap()
+		if address.IsLoopback() || address.IsUnspecified() || address.IsMulticast() || address.IsLinkLocalUnicast() {
+			return nil, fmt.Errorf("%w: unusable nameserver %q", ErrInvalidOptions, value)
+		}
+		nameservers = append(nameservers, address.String())
+	}
+	return nameservers, nil
 }
 
 func (m Mount) spec() (string, error) {

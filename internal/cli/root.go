@@ -31,7 +31,11 @@ type rootOptions struct {
 // NewRootCommand creates the root command for acc.
 func NewRootCommand() *cobra.Command {
 	return newRootCommand(func() (composeService, error) {
-		return compose.NewComposeClient()
+		registry, err := newStateServiceRegistry()
+		if err != nil {
+			return nil, err
+		}
+		return compose.NewComposeClient(compose.WithServiceRegistry(registry))
 	})
 }
 
@@ -117,10 +121,14 @@ func newDownCommand(rootOpts *rootOptions, newClient composeClientFactory) *cobr
 			if err != nil {
 				return err
 			}
+			output := cmd.OutOrStdout()
 			return client.Down(cmd.Context(), path, parseOpts, compose.DownOptions{
 				Services:      services,
 				RemoveOrphans: removeOrphans,
 				Volumes:       volumes,
+				OnWarning: func(message string) {
+					_ = writeWarning(output, !rootOpts.noColor, message)
+				},
 			})
 		},
 	}

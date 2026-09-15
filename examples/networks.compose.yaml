@@ -20,17 +20,35 @@ services:
     depends_on:
       - frontend
       - backend
-    # ACC passes one --network flag for each listed network.
+    # ACC passes one --network flag for each listed network. Aliases belong
+    # only to the network on which they are declared.
     networks:
-      - public
-      - private
+      public:
+        aliases:
+          - public-relay
+      private:
+        aliases:
+          - private-relay
+
+  default-client:
+    image: alpine:3.20
+    command: ["sh", "-c", "while true; do echo default-client-ready; sleep 5; done"]
+    # Omitting networks attaches this service only to acc-networks_default.
+    # Remove this service to verify that ACC does not create a default network
+    # when every service explicitly declares one or more networks.
+    #
+    # ACC passes these upstream resolvers directly to this container when --no-coredns flag is used or just for the
+    # future per-project CoreDNS container.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
 
 networks:
   # ACC creates these as acc-networks_public and acc-networks_private.
   public:
   private:
 
-  # A pre-existing network can be attached without ACC creating or deleting it:
+  # A pre-existing network can be attached without ACC creating or deleting it use it for networks not managed by acc:
   # shared:
   #   external: true
   #   name: existing-network

@@ -17,5 +17,6 @@ separate from the others. Tear an example down with the same file:
 - `build.compose.yaml`: local Dockerfile build through `acc up`.
 - `volumes.compose.yaml`: bind, named, anonymous, and tmpfs mounts. Alternative
   options are documented inline.
-- `networks.compose.yaml`: project networks and a service attached to two of them.
-
+- `networks.compose.yaml`: isolated, multi-network, and implicit-default
+  services; network-scoped aliases; and the state records that will feed the
+  per-project CoreDNS container.

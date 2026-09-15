@@ -118,6 +118,95 @@ networks:
 	}
 }
 
+func TestUpDoesNotAttachExplicitlyNetworkedServiceToDefaultNetwork(t *testing.T) {
+	_, composePath := writeVolumeCompose(t, `name: demo
+services:
+  api:
+    image: alpine
+    networks:
+      - backend
+  worker:
+    image: alpine
+networks:
+  backend:
+`)
+
+	var calls [][]string
+	run := func(_ context.Context, args ...string) (string, error) {
+		calls = append(calls, append([]string(nil), args...))
+		if len(args) == 3 && args[0] == "network" && args[1] == "inspect" {
+			return "network not found", errors.New("command failed")
+		}
+		return "", nil
+	}
+	client := &ComposeClient{containerClient: &container.Client{
+		Container: container.NewContainerClient(run, nil),
+		Volumes:   container.NewVolumeClient(run),
+		Networks:  container.NewNetworkClient(run),
+	}}
+
+	if err := client.Up(context.Background(), composePath, ParseOptions{}, UpOptions{}); err != nil {
+		t.Fatalf("Up() error = %v", err)
+	}
+
+	for _, call := range calls {
+		if len(call) == 0 || call[0] != "run" {
+			continue
+		}
+		switch {
+		case hasArgument(call, "demo_api_1"):
+			if !hasArgument(call, "demo_backend") || hasArgument(call, "demo_default") {
+				t.Fatalf("api run args = %#v, want only demo_backend", call)
+			}
+		case hasArgument(call, "demo_worker_1"):
+			if !hasArgument(call, "demo_default") || hasArgument(call, "demo_backend") {
+				t.Fatalf("worker run args = %#v, want only demo_default", call)
+			}
+		}
+	}
+}
+
+func TestUpSkipsDefaultNetworkWhenEveryServiceDeclaresNetworks(t *testing.T) {
+	_, composePath := writeVolumeCompose(t, `name: demo
+services:
+  api:
+    image: alpine
+    networks:
+      - backend
+  worker:
+    image: alpine
+    networks:
+      - frontend
+networks:
+  backend:
+  frontend:
+`)
+
+	var calls [][]string
+	run := func(_ context.Context, args ...string) (string, error) {
+		calls = append(calls, append([]string(nil), args...))
+		if len(args) == 3 && args[0] == "network" && args[1] == "inspect" {
+			return "network not found", errors.New("command failed")
+		}
+		return "", nil
+	}
+	client := &ComposeClient{containerClient: &container.Client{
+		Container: container.NewContainerClient(run, nil),
+		Volumes:   container.NewVolumeClient(run),
+		Networks:  container.NewNetworkClient(run),
+	}}
+
+	if err := client.Up(context.Background(), composePath, ParseOptions{}, UpOptions{}); err != nil {
+		t.Fatalf("Up() error = %v", err)
+	}
+
+	for _, call := range calls {
+		if hasArgument(call, "demo_default") {
+			t.Fatalf("runtime calls = %#v, must not create, inspect, or attach demo_default", calls)
+		}
+	}
+}
+
 func TestUpRejectsNetworkOwnedByAnotherProject(t *testing.T) {
 	_, composePath := writeVolumeCompose(t, `name: demo
 services:

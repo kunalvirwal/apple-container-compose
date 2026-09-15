@@ -61,7 +61,12 @@ func validateNetworks(project *types.Project, services []string, onFatalWarning 
 			if _, exists := networks[logicalName]; !exists {
 				return nil, fatalUnsupportedFeature(onFatalWarning, fmt.Sprintf("service %q refers to undefined network %q", serviceName, logicalName))
 			}
-			if config != nil && !reflect.DeepEqual(*config, types.ServiceNetworkConfig{}) {
+			if config == nil {
+				continue
+			}
+			unsupported := *config
+			unsupported.Aliases = nil
+			if !reflect.DeepEqual(unsupported, types.ServiceNetworkConfig{}) {
 				return nil, fatalUnsupportedFeature(onFatalWarning, fmt.Sprintf("service %q network %q options are not supported by ACC", serviceName, logicalName))
 			}
 		}

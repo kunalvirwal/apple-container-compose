@@ -22,6 +22,9 @@ type DownOptions struct {
 	// Volumes removes named volumes created for the project. As with Docker
 	// Compose, named volumes are retained unless this option is set.
 	Volumes bool
+	// OnWarning receives non-fatal warnings. The SDK never renders warnings
+	// itself; callers decide whether and how to present them.
+	OnWarning func(string)
 }
 
 // Down stops and removes labeled project containers in reverse dependency order.
@@ -71,6 +74,11 @@ func (c *ComposeClient) Down(ctx context.Context, path string, parseOpts ParseOp
 		if _, err := c.containerClient.Container.Delete(ctx, container.DeleteOptions{IDs: ids, Force: opts.Force}); err != nil {
 			if !isNotFoundLikeError(err) {
 				return err
+			}
+		}
+		if c.registry != nil {
+			if err := c.registry.Remove(ctx, ids); err != nil {
+				warnRegistryFailure(opts.OnWarning, fmt.Errorf("remove service registry records: %w", err))
 			}
 		}
 	}

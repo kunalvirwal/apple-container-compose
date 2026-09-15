@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -74,6 +75,14 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 	if err := validateSharedNamedVolumes(project, opts.OnFatalWarning); err != nil {
 		return err
 	}
+	if err := validateServiceNameservers(project, services); err != nil {
+		return err
+	}
+	if c.registry != nil {
+		if err := c.registry.Ensure(ctx); err != nil {
+			return fmt.Errorf("ensure service registry: %w", err)
+		}
+	}
 	if err := c.resolveServiceImages(ctx, project, services, opts.Build, buildOutput); err != nil {
 		return err
 	}
@@ -112,6 +121,9 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 		}
 		name := containerName(project.Name, serviceName)
 		if existingAnonymousServices[serviceName] {
+			if err := c.registerServiceRuntime(ctx, project, svc, serviceName, name); err != nil {
+				warnRegistryFailure(opts.OnWarning, err)
+			}
 			if logSession != nil {
 				logSession.Start(project.Name, serviceName)
 			}
@@ -127,6 +139,9 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 				return err
 			}
 		}
+		if err := c.registerServiceRuntime(ctx, project, svc, serviceName, name); err != nil {
+			warnRegistryFailure(opts.OnWarning, err)
+		}
 		if logSession != nil {
 			logSession.Start(project.Name, serviceName)
 		}
@@ -136,6 +151,66 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 		return logSession.Wait(opts.Detach)
 	}
 
+	return nil
+}
+
+func warnRegistryFailure(onWarning func(string), err error) {
+	if onWarning != nil && err != nil {
+		onWarning(err.Error())
+	}
+}
+
+func validateServiceNameservers(project *types.Project, services []string) error {
+	for _, serviceName := range services {
+		service, err := project.GetService(serviceName)
+		if err != nil {
+			return err
+		}
+		if _, err := container.NormalizeNameservers([]string(service.DNS)); err != nil {
+			return fmt.Errorf("service %q dns: %w", serviceName, err)
+		}
+	}
+	return nil
+}
+
+func (c *ComposeClient) registerServiceRuntime(ctx context.Context, project *types.Project, service types.ServiceConfig, serviceName, containerName string) error {
+	if c.registry == nil {
+		return nil
+	}
+	details, err := c.containerClient.Container.InspectDetails(ctx, []string{containerName})
+	if err != nil {
+		return fmt.Errorf("inspect service %q for registry: %w", serviceName, err)
+	}
+	if len(details) != 1 || details[0].ID == "" {
+		return fmt.Errorf("inspect service %q for registry: expected one identified container", serviceName)
+	}
+	runtime := ServiceRuntime{
+		ProjectName: project.Name,
+		ServiceName: serviceName,
+		ContainerID: details[0].ID,
+		Nameservers: append([]string(nil), service.DNS...),
+		Networks:    make([]ServiceNetworkRuntime, 0, len(details[0].Networks)),
+	}
+	for _, attachment := range details[0].Networks {
+		runtime.Networks = append(runtime.Networks, ServiceNetworkRuntime{
+			Name:      attachment.Name,
+			Addresses: append([]netip.Addr(nil), attachment.Addresses...),
+			Aliases:   serviceNetworkAliases(project, service, attachment.Name),
+		})
+	}
+	if err := c.registry.Upsert(ctx, runtime); err != nil {
+		return fmt.Errorf("update service registry for service %q: %w", serviceName, err)
+	}
+	return nil
+}
+
+func serviceNetworkAliases(project *types.Project, service types.ServiceConfig, runtimeNetwork string) []string {
+	for logicalName, config := range service.Networks {
+		if config == nil || project.Networks[logicalName].Name != runtimeNetwork {
+			continue
+		}
+		return append([]string(nil), config.Aliases...)
+	}
 	return nil
 }
 
@@ -333,9 +408,10 @@ func toCreateOptions(project *types.Project, service types.ServiceConfig, projec
 			accProjectLabel: projectName,
 			accServiceLabel: serviceName,
 		},
-		Networks:  networkNames,
-		Mounts:    mounts,
-		Arguments: shellCommandToArgs(service.Command),
+		Nameservers: []string(service.DNS),
+		Networks:    networkNames,
+		Mounts:      mounts,
+		Arguments:   shellCommandToArgs(service.Command),
 	}
 
 	if service.CPUS > 0 {
