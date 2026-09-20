@@ -22,6 +22,8 @@ public `pkg` SDK.
 
 ## Working in this repository
 
+- Keep explanations clear and concise: state the direct answer first, then
+  include only the technical detail needed to justify it.
 - Make focused changes and preserve the existing separation between raw
   `container` command construction and Compose-level orchestration.
 - Pass `context.Context` through subprocess and orchestration paths. Preserve

@@ -109,9 +109,9 @@ func (c *ContainerClient) ListSummaries(ctx context.Context, opts ListOptions) (
 	return summaries, nil
 }
 
-// InspectDetails returns the names of volumes mounted by the requested
-// containers. It intentionally exposes only the typed metadata needed by the
-// compose layer rather than the runtime's full inspect response.
+// InspectDetails returns the volume and network metadata needed by
+// higher-level clients. It intentionally exposes only typed fields rather
+// than the runtime's full inspect response.
 func (c *ContainerClient) InspectDetails(ctx context.Context, ids []string) ([]ContainerDetails, error) {
 	if len(ids) == 0 {
 		return nil, ErrInvalidOptions

@@ -11,11 +11,7 @@ type stateServiceRegistry struct {
 	store *state.Store
 }
 
-func newStateServiceRegistry() (*stateServiceRegistry, error) {
-	path, err := state.DefaultPath()
-	if err != nil {
-		return nil, err
-	}
+func newStateServiceRegistry(path string) (*stateServiceRegistry, error) {
 	store, err := state.NewStore(path)
 	if err != nil {
 		return nil, err

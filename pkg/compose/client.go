@@ -11,6 +11,20 @@ type ComposeClient struct {
 // ClientOption configures an optional Compose client integration.
 type ClientOption func(*ComposeClient) error
 
+// WithContainerClient supplies the container runtime used by Compose. It is
+// useful to applications that also manage ACC infrastructure with the same
+// runtime client. When omitted, NewComposeClient constructs the default
+// client.
+func WithContainerClient(containerClient *container.Client) ClientOption {
+	return func(client *ComposeClient) error {
+		if containerClient == nil {
+			return ErrContainerClientNil
+		}
+		client.containerClient = containerClient
+		return nil
+	}
+}
+
 // WithServiceRegistry configures a registry that receives service runtime
 // records during Up and container removals during Down.
 func WithServiceRegistry(registry ServiceRegistry) ClientOption {
@@ -27,11 +41,7 @@ func WithServiceRegistry(registry ServiceRegistry) ClientOption {
 // client. Without WithServiceRegistry, it performs no registry or filesystem
 // state management.
 func NewComposeClient(options ...ClientOption) (*ComposeClient, error) {
-	containerClient, err := container.NewClient()
-	if err != nil {
-		return nil, err
-	}
-	client := &ComposeClient{containerClient: containerClient}
+	client := &ComposeClient{}
 	for _, option := range options {
 		if option == nil {
 			return nil, ErrClientOptionNil
@@ -39,6 +49,13 @@ func NewComposeClient(options ...ClientOption) (*ComposeClient, error) {
 		if err := option(client); err != nil {
 			return nil, err
 		}
+	}
+	if client.containerClient == nil {
+		containerClient, err := container.NewClient()
+		if err != nil {
+			return nil, err
+		}
+		client.containerClient = containerClient
 	}
 	return client, nil
 }

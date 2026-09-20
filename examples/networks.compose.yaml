@@ -37,8 +37,8 @@ services:
     # Remove this service to verify that ACC does not create a default network
     # when every service explicitly declares one or more networks.
     #
-    # ACC passes these upstream resolvers directly to this container when --no-coredns flag is used or just for the
-    # future per-project CoreDNS container.
+    # By default, ACC records these as forwarding nameservers for its CoreDNS
+    # plugin. With --no-coredns, ACC passes them directly to this container.
     dns:
       - 1.1.1.1
       - 8.8.8.8

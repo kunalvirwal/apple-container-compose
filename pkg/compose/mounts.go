@@ -38,7 +38,7 @@ func prepareServiceBindMounts(project *types.Project, services []string) error {
 	return nil
 }
 
-func mountsForService(project *types.Project, service types.ServiceConfig, anonymousSources []string) ([]container.Mount, error) {
+func mountsForService(project *types.Project, service types.ServiceConfig, anonymousVolumes []string) ([]container.Mount, error) {
 	if len(service.Volumes) == 0 && len(service.Tmpfs) == 0 {
 		return nil, nil
 	}
@@ -56,10 +56,10 @@ func mountsForService(project *types.Project, service types.ServiceConfig, anony
 		case types.VolumeTypeVolume:
 			anonymousSource := ""
 			if volume.Source == "" {
-				if anonymousIndex >= len(anonymousSources) {
+				if anonymousIndex >= len(anonymousVolumes) {
 					return nil, fmt.Errorf("anonymous volume for service %q was not prepared", service.Name)
 				}
-				anonymousSource = anonymousSources[anonymousIndex]
+				anonymousSource = anonymousVolumes[anonymousIndex]
 				anonymousIndex++
 			}
 			mount, err = namedVolumeMount(project, service.Name, volume, anonymousSource)
@@ -466,7 +466,7 @@ func prepareNamedVolumes(ctx context.Context, project *types.Project, services [
 		}
 	}
 
-	anonymousSources := make(map[string][]string)
+	anonymousVolumes := make(map[string][]string)
 	for _, serviceName := range services {
 		service, err := project.GetService(serviceName)
 		if err != nil {
@@ -500,10 +500,10 @@ func prepareNamedVolumes(ctx context.Context, project *types.Project, services [
 			}); err != nil {
 				return nil, fmt.Errorf("create anonymous volume %q: %w", runtimeName, err)
 			}
-			anonymousSources[serviceName] = append(anonymousSources[serviceName], runtimeName)
+			anonymousVolumes[serviceName] = append(anonymousVolumes[serviceName], runtimeName)
 		}
 	}
-	return anonymousSources, nil
+	return anonymousVolumes, nil
 }
 
 func warnUnmanagedVolume(onWarning func(string), projectName, volumeName, runtimeName string, summary container.VolumeSummary) {

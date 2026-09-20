@@ -41,16 +41,65 @@ type UpOptions struct {
 	OnFatalWarning func(string)
 }
 
+// ServiceStartOptions controls the service-start phase of an UpSession.
+type ServiceStartOptions struct {
+	// DNSByNetwork maps runtime network names to DNS server addresses. Every
+	// network used by a service must have an entry when this is set.
+	// With no entries, Compose dns values are passed directly to the runtime.
+	DNSByNetwork map[string]netip.Addr
+}
+
+// UpSession is an opaque, validated Compose startup session. It is returned
+// only by PrepareUp, which ensures callers cannot start services before the
+// Compose project and its runtime resources have been prepared.
+type UpSession struct {
+	client                    *ComposeClient
+	project                   *types.Project
+	services                  []string
+	opts                      UpOptions
+	serviceNetworks           map[string][]string
+	anonymousVolumes          map[string][]string
+	existingAnonymousServices map[string]bool
+	runtimeNetworkNames       []string
+}
+
+// ProjectName returns the resolved project name for this startup session.
+func (p *UpSession) ProjectName() string {
+	if p == nil || p.project == nil {
+		return ""
+	}
+	return p.project.Name
+}
+
+// NetworkNames returns the sorted runtime networks used by selected services.
+func (p *UpSession) NetworkNames() []string {
+	if p == nil {
+		return nil
+	}
+	return append([]string(nil), p.runtimeNetworkNames...)
+}
+
 // Up brings selected services up in dependency order. It builds missing local
 // images for services that declare build configuration before starting them.
 func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOptions, opts UpOptions) error {
+	session, err := c.PrepareUp(ctx, path, parseOpts, opts)
+	if err != nil {
+		return err
+	}
+	return session.StartServices(ctx, ServiceStartOptions{})
+}
+
+// PrepareUp loads and validates a Compose project, resolves images and mount
+// sources, creates required volumes, and ensures required networks. It does
+// not start any Compose service containers.
+func (c *ComposeClient) PrepareUp(ctx context.Context, path string, parseOpts ParseOptions, opts UpOptions) (*UpSession, error) {
 	if c.containerClient == nil {
-		return ErrContainerClientNil
+		return nil, ErrContainerClientNil
 	}
 
 	project, err := c.loadProject(ctx, path, parseOpts)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	buildOutput := opts.BuildOutput
@@ -60,54 +109,77 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 
 	services, err := generateServiceOrder(project, opts.Services)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	networkDefinitions, err := validateNetworks(project, services, opts.OnFatalWarning)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := validateServiceMounts(project, services, opts.OnWarning, opts.OnFatalWarning); err != nil {
-		return err
+		return nil, err
 	}
 	if err := validateProjectVolumeLabels(project, services, opts.OnFatalWarning); err != nil {
-		return err
+		return nil, err
 	}
 	if err := validateSharedNamedVolumes(project, opts.OnFatalWarning); err != nil {
-		return err
+		return nil, err
 	}
 	if err := validateServiceNameservers(project, services); err != nil {
-		return err
+		return nil, err
 	}
 	if c.registry != nil {
 		if err := c.registry.Ensure(ctx); err != nil {
-			return fmt.Errorf("ensure service registry: %w", err)
+			return nil, fmt.Errorf("ensure service registry: %w", err)
 		}
 	}
 	if err := c.resolveServiceImages(ctx, project, services, opts.Build, buildOutput); err != nil {
-		return err
+		return nil, err
 	}
 	if err := prepareServiceBindMounts(project, services); err != nil {
-		return err
+		return nil, err
 	}
 	existingAnonymousServices, err := c.existingAnonymousServices(ctx, project, services)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	anonymousSources, err := prepareNamedVolumes(ctx, project, services, &c.containerClient.Volumes, opts.OnWarning, existingAnonymousServices)
+	anonymousVolumes, err := prepareNamedVolumes(ctx, project, services, &c.containerClient.Volumes, opts.OnWarning, existingAnonymousServices)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	networkNames, err := c.ensureNetworks(ctx, project, networkDefinitions, opts.OnFatalWarning)
 	if err != nil {
+		return nil, err
+	}
+	return &UpSession{
+		client:                    c,
+		project:                   project,
+		services:                  append([]string(nil), services...),
+		opts:                      opts,
+		serviceNetworks:           networkNames,
+		anonymousVolumes:          anonymousVolumes,
+		existingAnonymousServices: existingAnonymousServices,
+		runtimeNetworkNames:       uniqueServiceNetworkNames(networkNames, services),
+	}, nil
+}
+
+// StartServices starts the prepared services in dependency order. A DNS server
+// is selected from each service's attached runtime networks; this is
+// deliberately done here because Compose owns service/network membership.
+func (p *UpSession) StartServices(ctx context.Context, startOpts ServiceStartOptions) error {
+	if p == nil || p.client == nil || p.client.containerClient == nil || p.project == nil {
+		return ErrUpSessionInvalid
+	}
+	if err := validateDNSByNetwork(startOpts.DNSByNetwork, p.runtimeNetworkNames); err != nil {
 		return err
 	}
+
 	var logSession *serviceLogSession
-	if opts.Attach {
-		logSession = newServiceLogSession(c, ctx, opts.Output, len(services))
+	if p.opts.Attach {
+		logSession = newServiceLogSession(p.client, ctx, p.opts.Output, len(p.services))
 	}
 
-	for _, serviceName := range services {
-		svc, err := project.GetService(serviceName)
+	for _, serviceName := range p.services {
+		svc, err := p.project.GetService(serviceName)
 		if err != nil {
 			return err
 		}
@@ -117,41 +189,89 @@ func (c *ComposeClient) Up(ctx context.Context, path string, parseOpts ParseOpti
 			if svc.Build == nil {
 				return fmt.Errorf("service %q has neither image nor build", serviceName)
 			}
-			image = containerName(project.Name, serviceName)
+			image = containerName(p.project.Name, serviceName)
 		}
-		name := containerName(project.Name, serviceName)
-		if existingAnonymousServices[serviceName] {
-			if err := c.registerServiceRuntime(ctx, project, svc, serviceName, name); err != nil {
-				warnRegistryFailure(opts.OnWarning, err)
+		name := containerName(p.project.Name, serviceName)
+		if p.existingAnonymousServices[serviceName] {
+			if err := p.client.registerServiceRuntime(ctx, p.project, svc, serviceName, name); err != nil {
+				warnRegistryFailure(p.opts.OnWarning, err)
 			}
 			if logSession != nil {
-				logSession.Start(project.Name, serviceName)
+				logSession.Start(p.project.Name, serviceName)
 			}
 			continue
 		}
-		createOpts, err := toCreateOptions(project, svc, project.Name, serviceName, name, networkNames[serviceName], anonymousSources[serviceName])
+
+		createOpts, err := toCreateOptions(p.project, svc, p.project.Name, serviceName, name, p.serviceNetworks[serviceName], p.anonymousVolumes[serviceName])
 		if err != nil {
 			return err
 		}
+		if len(startOpts.DNSByNetwork) > 0 {
+			dns, err := dnsForService(p.serviceNetworks[serviceName], startOpts.DNSByNetwork)
+			if err != nil {
+				return fmt.Errorf("service %q: %w", serviceName, err)
+			}
+			createOpts.Nameservers = []string{dns.String()}
+		}
 
-		if _, err := c.containerClient.Container.Run(ctx, image, createOpts); err != nil {
+		if _, err := p.client.containerClient.Container.Run(ctx, image, createOpts); err != nil {
 			if !isAlreadyRunningOrExisting(err) {
 				return err
 			}
 		}
-		if err := c.registerServiceRuntime(ctx, project, svc, serviceName, name); err != nil {
-			warnRegistryFailure(opts.OnWarning, err)
+		if err := p.client.registerServiceRuntime(ctx, p.project, svc, serviceName, name); err != nil {
+			warnRegistryFailure(p.opts.OnWarning, err)
 		}
 		if logSession != nil {
-			logSession.Start(project.Name, serviceName)
+			logSession.Start(p.project.Name, serviceName)
 		}
 	}
 
 	if logSession != nil {
-		return logSession.Wait(opts.Detach)
+		return logSession.Wait(p.opts.Detach)
 	}
-
 	return nil
+}
+
+func uniqueServiceNetworkNames(serviceNetworks map[string][]string, services []string) []string {
+	set := make(map[string]struct{})
+	for _, serviceName := range services {
+		for _, networkName := range serviceNetworks[serviceName] {
+			set[networkName] = struct{}{}
+		}
+	}
+	names := make([]string, 0, len(set))
+	for networkName := range set {
+		names = append(names, networkName)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func validateDNSByNetwork(dnsByNetwork map[string]netip.Addr, networks []string) error {
+	if len(dnsByNetwork) == 0 {
+		return nil
+	}
+	for networkName, address := range dnsByNetwork {
+		if strings.TrimSpace(networkName) == "" || !address.IsValid() || !address.IsGlobalUnicast() {
+			return ErrInvalidDNSConfig
+		}
+	}
+	for _, networkName := range networks {
+		if _, found := dnsByNetwork[networkName]; !found {
+			return fmt.Errorf("%w: no DNS server for network %q", ErrInvalidDNSConfig, networkName)
+		}
+	}
+	return nil
+}
+
+func dnsForService(networks []string, dnsByNetwork map[string]netip.Addr) (netip.Addr, error) {
+	for _, networkName := range networks {
+		if address, found := dnsByNetwork[networkName]; found {
+			return address, nil
+		}
+	}
+	return netip.Addr{}, fmt.Errorf("%w: service has no network with a DNS server", ErrInvalidDNSConfig)
 }
 
 func warnRegistryFailure(onWarning func(string), err error) {
@@ -395,8 +515,8 @@ func (w *prefixedWriter) Write(p []byte) (int, error) {
 }
 
 // toCreateOptions converts compose service run-time settings into container create options.
-func toCreateOptions(project *types.Project, service types.ServiceConfig, projectName, serviceName, name string, networkNames, anonymousSources []string) (container.CreateOptions, error) {
-	mounts, err := mountsForService(project, service, anonymousSources)
+func toCreateOptions(project *types.Project, service types.ServiceConfig, projectName, serviceName, name string, networkNames, anonymousVolumes []string) (container.CreateOptions, error) {
+	mounts, err := mountsForService(project, service, anonymousVolumes)
 	if err != nil {
 		return container.CreateOptions{}, err
 	}

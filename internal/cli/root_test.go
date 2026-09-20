@@ -11,9 +11,12 @@ import (
 
 func TestUpMarksFatalDiagnosticAsReported(t *testing.T) {
 	client := fatalDiagnosticComposeClient{}
-	root := newRootCommand(func() (composeService, error) {
-		return client, nil
-	})
+	root := newRootCommand(
+		func() (composeService, error) { return client, nil },
+		func(ctx context.Context, path string, parseOpts compose.ParseOptions, opts compose.UpOptions, _ bool) error {
+			return client.Up(ctx, path, parseOpts, opts)
+		},
+	)
 	var output bytes.Buffer
 	root.SetOut(&output)
 	root.SetArgs([]string{"up", "--file", "compose.yaml"})
@@ -27,6 +30,26 @@ func TestUpMarksFatalDiagnosticAsReported(t *testing.T) {
 	}
 	if got, want := output.String(), "\x1b[91m[Unsupported]: tmpfs uid/gid ownership is not supported by Apple container\n\x1b[0m"; got != want {
 		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
+func TestUpPassesNoCoreDNSOption(t *testing.T) {
+	noCoreDNS := false
+	client := fatalDiagnosticComposeClient{}
+	root := newRootCommand(
+		func() (composeService, error) { return client, nil },
+		func(_ context.Context, _ string, _ compose.ParseOptions, _ compose.UpOptions, skipCoreDNS bool) error {
+			noCoreDNS = skipCoreDNS
+			return nil
+		},
+	)
+	root.SetArgs([]string{"up", "--no-coredns", "--file", "compose.yaml"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !noCoreDNS {
+		t.Fatal("up command did not receive NoCoreDNS")
 	}
 }
 

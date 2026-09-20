@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/kunalvirwal/apple-container-compose/internal/state"
 	"github.com/kunalvirwal/apple-container-compose/pkg/compose"
 	"github.com/spf13/cobra"
 )
@@ -18,8 +19,6 @@ type composeService interface {
 	Logs(context.Context, string, compose.ParseOptions, compose.LogsOptions) error
 }
 
-type composeClientFactory func() (composeService, error)
-
 type rootOptions struct {
 	files            []string
 	projectName      string
@@ -30,16 +29,10 @@ type rootOptions struct {
 
 // NewRootCommand creates the root command for acc.
 func NewRootCommand() *cobra.Command {
-	return newRootCommand(func() (composeService, error) {
-		registry, err := newStateServiceRegistry()
-		if err != nil {
-			return nil, err
-		}
-		return compose.NewComposeClient(compose.WithServiceRegistry(registry))
-	})
+	return newRootCommand(newComposeClient, runUp)
 }
 
-func newRootCommand(newClient composeClientFactory) *cobra.Command {
+func newRootCommand(newComposeClient func() (composeService, error), executeUp func(context.Context, string, compose.ParseOptions, compose.UpOptions, bool) error) *cobra.Command {
 	opts := &rootOptions{}
 
 	rootCmd := &cobra.Command{
@@ -60,30 +53,48 @@ func newRootCommand(newClient composeClientFactory) *cobra.Command {
 	flags.BoolVar(&opts.noColor, "no-color", false, "Disable colored output")
 
 	rootCmd.AddCommand(
-		newUpCommand(opts, newClient),
-		newDownCommand(opts, newClient),
-		newBuildCommand(opts, newClient),
-		newLogsCommand(opts, newClient),
+		newUpCommand(opts, executeUp),
+		newDownCommand(opts, newComposeClient),
+		newBuildCommand(opts, newComposeClient),
+		newLogsCommand(opts, newComposeClient),
 	)
 
 	return rootCmd
 }
 
-func newUpCommand(rootOpts *rootOptions, newClient composeClientFactory) *cobra.Command {
+func newComposeClient() (composeService, error) {
+	statePath, err := state.DefaultPath()
+	if err != nil {
+		return nil, err
+	}
+	registry, err := newStateServiceRegistry(statePath)
+	if err != nil {
+		return nil, err
+	}
+	return compose.NewComposeClient(compose.WithServiceRegistry(registry))
+}
+
+func newUpCommand(rootOpts *rootOptions, executeUp func(context.Context, string, compose.ParseOptions, compose.UpOptions, bool) error) *cobra.Command {
 	var build bool
 	var detach bool
+	var noCoreDNS bool
 
 	cmd := &cobra.Command{
 		Use:   "up [SERVICE...]",
 		Short: "Create and start services",
 		RunE: func(cmd *cobra.Command, services []string) error {
-			client, path, parseOpts, err := prepareCommand(rootOpts, newClient)
+			path, err := resolveComposePath(rootOpts.files, rootOpts.projectDirectory)
 			if err != nil {
 				return err
 			}
+			parseOpts := compose.ParseOptions{
+				ProjectName: rootOpts.projectName,
+				WorkingDir:  rootOpts.projectDirectory,
+				EnvFiles:    rootOpts.envFiles,
+			}
 			output := cmd.OutOrStdout()
 			fatalDiagnosticRendered := false
-			err = client.Up(cmd.Context(), path, parseOpts, compose.UpOptions{
+			upOpts := compose.UpOptions{
 				Services:    services,
 				Build:       build,
 				Output:      newServiceLogWriter(output, !rootOpts.noColor),
@@ -96,7 +107,8 @@ func newUpCommand(rootOpts *rootOptions, newClient composeClientFactory) *cobra.
 					fatalDiagnosticRendered = true
 					_ = writeFatalWarning(output, !rootOpts.noColor, message)
 				},
-			})
+			}
+			err = executeUp(cmd.Context(), path, parseOpts, upOpts, noCoreDNS)
 			if fatalDiagnosticRendered && err != nil {
 				return markErrorReported(err)
 			}
@@ -106,10 +118,11 @@ func newUpCommand(rootOpts *rootOptions, newClient composeClientFactory) *cobra.
 
 	cmd.Flags().BoolVar(&build, "build", false, "Build images before starting services")
 	cmd.Flags().BoolVarP(&detach, "detach", "d", false, "Run services in the background")
+	cmd.Flags().BoolVar(&noCoreDNS, "no-coredns", false, "Do not start ACC CoreDNS; pass service dns entries directly to containers")
 	return cmd
 }
 
-func newDownCommand(rootOpts *rootOptions, newClient composeClientFactory) *cobra.Command {
+func newDownCommand(rootOpts *rootOptions, newComposeClient func() (composeService, error)) *cobra.Command {
 	var removeOrphans bool
 	var volumes bool
 
@@ -117,7 +130,7 @@ func newDownCommand(rootOpts *rootOptions, newClient composeClientFactory) *cobr
 		Use:   "down [SERVICE...]",
 		Short: "Stop and remove services",
 		RunE: func(cmd *cobra.Command, services []string) error {
-			client, path, parseOpts, err := prepareCommand(rootOpts, newClient)
+			client, path, parseOpts, err := prepareCommand(rootOpts, newComposeClient)
 			if err != nil {
 				return err
 			}
@@ -137,12 +150,12 @@ func newDownCommand(rootOpts *rootOptions, newClient composeClientFactory) *cobr
 	return cmd
 }
 
-func newBuildCommand(rootOpts *rootOptions, newClient composeClientFactory) *cobra.Command {
+func newBuildCommand(rootOpts *rootOptions, newComposeClient func() (composeService, error)) *cobra.Command {
 	return &cobra.Command{
 		Use:   "build [SERVICE...]",
 		Short: "Build service images",
 		RunE: func(cmd *cobra.Command, services []string) error {
-			client, path, parseOpts, err := prepareCommand(rootOpts, newClient)
+			client, path, parseOpts, err := prepareCommand(rootOpts, newComposeClient)
 			if err != nil {
 				return err
 			}
@@ -154,14 +167,14 @@ func newBuildCommand(rootOpts *rootOptions, newClient composeClientFactory) *cob
 	}
 }
 
-func newLogsCommand(rootOpts *rootOptions, newClient composeClientFactory) *cobra.Command {
+func newLogsCommand(rootOpts *rootOptions, newComposeClient func() (composeService, error)) *cobra.Command {
 	var follow bool
 
 	cmd := &cobra.Command{
 		Use:   "logs [SERVICE...]",
 		Short: "View service logs",
 		RunE: func(cmd *cobra.Command, services []string) error {
-			client, path, parseOpts, err := prepareCommand(rootOpts, newClient)
+			client, path, parseOpts, err := prepareCommand(rootOpts, newComposeClient)
 			if err != nil {
 				return err
 			}
@@ -177,17 +190,15 @@ func newLogsCommand(rootOpts *rootOptions, newClient composeClientFactory) *cobr
 	return cmd
 }
 
-func prepareCommand(rootOpts *rootOptions, newClient composeClientFactory) (composeService, string, compose.ParseOptions, error) {
+func prepareCommand(rootOpts *rootOptions, newComposeClient func() (composeService, error)) (composeService, string, compose.ParseOptions, error) {
 	path, err := resolveComposePath(rootOpts.files, rootOpts.projectDirectory)
 	if err != nil {
 		return nil, "", compose.ParseOptions{}, err
 	}
-
-	client, err := newClient()
+	client, err := newComposeClient()
 	if err != nil {
 		return nil, "", compose.ParseOptions{}, err
 	}
-
 	return client, path, compose.ParseOptions{
 		ProjectName: rootOpts.projectName,
 		WorkingDir:  rootOpts.projectDirectory,
