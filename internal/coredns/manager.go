@@ -115,10 +115,10 @@ func (m *Manager) Start(ctx context.Context, projectName string, networkNames []
 	return networkIPv4Addresses(details[0].Networks, networks)
 }
 
-// Remove stops and deletes this project's CoreDNS container. It identifies the
-// container by ACC's project and CoreDNS-role labels so it cannot remove a
-// similarly named container owned by another application.
-func (m *Manager) Remove(ctx context.Context, projectName string, force bool) error {
+// RemoveIfUnused stops and deletes this project's CoreDNS containers only
+// when no other project containers remain. This preserves DNS and all
+// networks attached to it while Compose orphans are intentionally retained.
+func (m *Manager) RemoveIfUnused(ctx context.Context, projectName string, force bool) error {
 	if m == nil || m.runtime == nil {
 		return fmt.Errorf("CoreDNS manager is not initialized")
 	}
@@ -127,21 +127,47 @@ func (m *Manager) Remove(ctx context.Context, projectName string, force bool) er
 		return fmt.Errorf("CoreDNS project name cannot be empty")
 	}
 
+	coreDNSIDs, otherProjectContainers, err := m.projectContainerIDs(ctx, projectName)
+	if err != nil {
+		return err
+	}
+	if otherProjectContainers {
+		return nil
+	}
+	return m.removeContainers(ctx, coreDNSIDs, force)
+}
+
+func (m *Manager) projectContainerIDs(ctx context.Context, projectName string) ([]string, bool, error) {
 	containers, err := m.runtime.Container.ListSummaries(ctx, container.ListOptions{All: true})
 	if err != nil {
-		return fmt.Errorf("list CoreDNS containers: %w", err)
+		return nil, false, fmt.Errorf("list CoreDNS containers: %w", err)
 	}
+
+	coreDNSIDs := make([]string, 0)
+	otherProjectContainers := false
 	for _, item := range containers {
-		if item.Labels[projectLabel] != projectName || item.Labels[roleLabel] != coreDNSRole {
+		if item.Labels[projectLabel] != projectName {
 			continue
 		}
-		if _, err := m.runtime.Container.Stop(ctx, container.StopOptions{IDs: []string{item.ID}}); err != nil && !isNotFoundLikeError(err) {
-			return fmt.Errorf("stop CoreDNS container %q: %w", item.ID, err)
+		if item.Labels[roleLabel] == coreDNSRole {
+			coreDNSIDs = append(coreDNSIDs, item.ID)
+			continue
 		}
-		if _, err := m.runtime.Container.Delete(ctx, container.DeleteOptions{IDs: []string{item.ID}, Force: force}); err != nil && !isNotFoundLikeError(err) {
-			return fmt.Errorf("delete CoreDNS container %q: %w", item.ID, err)
-		}
+		otherProjectContainers = true
+	}
+	sort.Strings(coreDNSIDs)
+	return coreDNSIDs, otherProjectContainers, nil
+}
+
+func (m *Manager) removeContainers(ctx context.Context, ids []string, force bool) error {
+	if len(ids) == 0 {
 		return nil
+	}
+	if _, err := m.runtime.Container.Stop(ctx, container.StopOptions{IDs: ids}); err != nil && !isNotFoundLikeError(err) {
+		return fmt.Errorf("stop CoreDNS containers: %w", err)
+	}
+	if _, err := m.runtime.Container.Delete(ctx, container.DeleteOptions{IDs: ids, Force: force}); err != nil && !isNotFoundLikeError(err) {
+		return fmt.Errorf("delete CoreDNS containers: %w", err)
 	}
 	return nil
 }

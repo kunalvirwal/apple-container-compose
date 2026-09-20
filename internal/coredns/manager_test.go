@@ -70,7 +70,34 @@ func TestNetworkIPv4Addresses(t *testing.T) {
 	}
 }
 
-func TestManagerRemoveDeletesOnlyLabeledCoreDNS(t *testing.T) {
+func TestManagerRemoveIfUnusedRetainsCoreDNSForRemainingProjectContainer(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	var calls [][]string
+	run := func(_ context.Context, args ...string) (string, error) {
+		calls = append(calls, append([]string(nil), args...))
+		if reflect.DeepEqual(args, []string{"list", "--format", "json", "--all"}) {
+			return `[
+  {"configuration":{"id":"demo_old_1","labels":{"` + projectLabel + `":"demo","io.github.kunalvirwal.acc.service":"old"}}},
+  {"configuration":{"id":"demo-coredns","labels":{"` + projectLabel + `":"demo","` + roleLabel + `":"` + coreDNSRole + `"}}}
+]`, nil
+		}
+		t.Fatalf("unexpected command: %#v", args)
+		return "", nil
+	}
+	manager, err := NewManager(&container.Client{Container: container.NewContainerClient(run, nil)}, ManagerOptions{StatePath: statePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.RemoveIfUnused(context.Background(), "demo", false); err != nil {
+		t.Fatalf("RemoveIfUnused() error = %v", err)
+	}
+	want := [][]string{{"list", "--format", "json", "--all"}}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls = %#v, want %#v", calls, want)
+	}
+}
+
+func TestManagerRemoveIfUnusedDeletesAllCoreDNSContainers(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "state.json")
 	var calls [][]string
 	run := func(_ context.Context, args ...string) (string, error) {
@@ -78,11 +105,11 @@ func TestManagerRemoveDeletesOnlyLabeledCoreDNS(t *testing.T) {
 		switch {
 		case reflect.DeepEqual(args, []string{"list", "--format", "json", "--all"}):
 			return `[
-  {"configuration":{"id":"demo_app_1","labels":{"` + projectLabel + `":"demo"}}},
-  {"configuration":{"id":"demo-coredns","labels":{"` + projectLabel + `":"demo","` + roleLabel + `":"` + coreDNSRole + `"}}}
+  {"configuration":{"id":"demo-coredns-b","labels":{"` + projectLabel + `":"demo","` + roleLabel + `":"` + coreDNSRole + `"}}},
+  {"configuration":{"id":"demo-coredns-a","labels":{"` + projectLabel + `":"demo","` + roleLabel + `":"` + coreDNSRole + `"}}}
 ]`, nil
-		case reflect.DeepEqual(args, []string{"stop", "demo-coredns"}),
-			reflect.DeepEqual(args, []string{"delete", "demo-coredns"}):
+		case reflect.DeepEqual(args, []string{"stop", "demo-coredns-a", "demo-coredns-b"}),
+			reflect.DeepEqual(args, []string{"delete", "demo-coredns-a", "demo-coredns-b"}):
 			return "", nil
 		default:
 			t.Fatalf("unexpected command: %#v", args)
@@ -93,13 +120,13 @@ func TestManagerRemoveDeletesOnlyLabeledCoreDNS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.Remove(context.Background(), "demo", false); err != nil {
-		t.Fatalf("Remove() error = %v", err)
+	if err := manager.RemoveIfUnused(context.Background(), "demo", false); err != nil {
+		t.Fatalf("RemoveIfUnused() error = %v", err)
 	}
 	want := [][]string{
 		{"list", "--format", "json", "--all"},
-		{"stop", "demo-coredns"},
-		{"delete", "demo-coredns"},
+		{"stop", "demo-coredns-a", "demo-coredns-b"},
+		{"delete", "demo-coredns-a", "demo-coredns-b"},
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("calls = %#v, want %#v", calls, want)

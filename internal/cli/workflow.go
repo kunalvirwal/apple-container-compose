@@ -79,7 +79,7 @@ func runDown(ctx context.Context, path string, parseOpts compose.ParseOptions, o
 		if err != nil {
 			return err
 		}
-		if err := coreDNSManager.Remove(ctx, session.ProjectName(), opts.Force); err != nil {
+		if err := coreDNSManager.RemoveIfUnused(ctx, session.ProjectName(), opts.Force); err != nil {
 			return err
 		}
 	}

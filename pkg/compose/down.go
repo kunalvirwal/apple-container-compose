@@ -343,6 +343,11 @@ func downContainerIDs(project *types.Project, services []string, containers []co
 			continue
 		}
 		serviceName := item.Labels[accServiceLabel]
+		if strings.TrimSpace(serviceName) == "" {
+			// Project infrastructure is not a Compose service or orphan. Its
+			// lifecycle is coordinated outside the Compose SDK.
+			continue
+		}
 		_, isActive := activeServices[serviceName]
 		_, isRequested := requestedServices[serviceName]
 		isOrphan := !isActive
