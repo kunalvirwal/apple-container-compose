@@ -13,6 +13,8 @@ var (
 	ErrServiceRegistryNil = errors.New("service registry cannot be nil")
 	// ErrUpSessionInvalid indicates an UpSession was not returned by PrepareUp.
 	ErrUpSessionInvalid = errors.New("compose up session is invalid")
+	// ErrDownSessionInvalid indicates a DownSession was not returned by PrepareDown.
+	ErrDownSessionInvalid = errors.New("compose down session is invalid")
 	// ErrInvalidDNSConfig indicates invalid or incomplete per-network DNS configuration.
 	ErrInvalidDNSConfig = errors.New("invalid DNS configuration")
 	// ErrServiceNotFound indicates a requested service is absent from the loaded project.

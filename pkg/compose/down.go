@@ -27,34 +27,66 @@ type DownOptions struct {
 	OnWarning func(string)
 }
 
+// DownSession is a prepared Compose teardown. It separates service removal
+// from project-resource cleanup so applications can manage their own
+// infrastructure between those phases.
+type DownSession struct {
+	client              *ComposeClient
+	projectName         string
+	serviceIDs          []string
+	attachedVolumeNames map[string]struct{}
+	opts                DownOptions
+}
+
+// ProjectName returns the resolved Compose project name for this teardown.
+func (p *DownSession) ProjectName() string {
+	if p == nil {
+		return ""
+	}
+	return p.projectName
+}
+
 // Down stops and removes labeled project containers in reverse dependency order.
 func (c *ComposeClient) Down(ctx context.Context, path string, parseOpts ParseOptions, opts DownOptions) error {
+	session, err := c.PrepareDown(ctx, path, parseOpts, opts)
+	if err != nil {
+		return err
+	}
+	if err := session.RemoveServices(ctx); err != nil {
+		return err
+	}
+	return session.RemoveResources(ctx)
+}
+
+// PrepareDown loads the Compose project and identifies the service containers
+// and volumes that a teardown will affect. It does not remove any resources.
+func (c *ComposeClient) PrepareDown(ctx context.Context, path string, parseOpts ParseOptions, opts DownOptions) (*DownSession, error) {
 	if c.containerClient == nil {
-		return ErrContainerClientNil
+		return nil, ErrContainerClientNil
 	}
 
 	project, err := c.loadProject(ctx, path, parseOpts)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	services, err := generateDownServiceOrder(project, opts.Services)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	containers, err := c.containerClient.Container.ListSummaries(ctx, container.ListOptions{All: true})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	ids := downContainerIDs(project, services, containers, opts.RemoveOrphans)
+	serviceIDs := downContainerIDs(project, services, containers, opts.RemoveOrphans)
 	attachedVolumeNames := make(map[string]struct{})
-	if opts.Volumes && len(opts.Services) == 0 && len(ids) > 0 {
-		details, err := c.containerClient.Container.InspectDetails(ctx, ids)
+	if opts.Volumes && len(opts.Services) == 0 && len(serviceIDs) > 0 {
+		details, err := c.containerClient.Container.InspectDetails(ctx, serviceIDs)
 		if err != nil {
 			if !isNotFoundLikeError(err) {
-				return err
+				return nil, err
 			}
 		} else {
 			for _, item := range details {
@@ -64,36 +96,63 @@ func (c *ComposeClient) Down(ctx context.Context, path string, parseOpts ParseOp
 			}
 		}
 	}
-	if len(ids) > 0 {
-		if _, err := c.containerClient.Container.Stop(ctx, container.StopOptions{IDs: ids}); err != nil {
+	return &DownSession{
+		client:              c,
+		projectName:         project.Name,
+		serviceIDs:          append([]string(nil), serviceIDs...),
+		attachedVolumeNames: attachedVolumeNames,
+		opts:                opts,
+	}, nil
+}
+
+// RemoveServices stops and deletes the selected Compose service containers.
+func (p *DownSession) RemoveServices(ctx context.Context) error {
+	if p == nil || p.client == nil || p.client.containerClient == nil {
+		return ErrDownSessionInvalid
+	}
+	if len(p.serviceIDs) > 0 {
+		if _, err := p.client.containerClient.Container.Stop(ctx, container.StopOptions{IDs: p.serviceIDs}); err != nil {
 			if !isNotFoundLikeError(err) {
 				return err
 			}
 		}
 
-		if _, err := c.containerClient.Container.Delete(ctx, container.DeleteOptions{IDs: ids, Force: opts.Force}); err != nil {
+		if _, err := p.client.containerClient.Container.Delete(ctx, container.DeleteOptions{IDs: p.serviceIDs, Force: p.opts.Force}); err != nil {
 			if !isNotFoundLikeError(err) {
 				return err
 			}
 		}
-		if c.registry != nil {
-			if err := c.registry.Remove(ctx, ids); err != nil {
-				warnRegistryFailure(opts.OnWarning, fmt.Errorf("remove service registry records: %w", err))
+		if p.client.registry != nil {
+			if err := p.client.registry.Remove(ctx, p.serviceIDs); err != nil {
+				warnRegistryFailure(p.opts.OnWarning, fmt.Errorf("remove service registry records: %w", err))
 			}
 		}
 	}
+	return nil
+}
 
-	if opts.Volumes && len(opts.Services) == 0 {
-		if err := c.removeProjectVolumes(ctx, project.Name, attachedVolumeNames); err != nil {
+// RemoveResources removes eligible project volumes and networks after service
+// containers and any application-managed infrastructure are gone.
+func (p *DownSession) RemoveResources(ctx context.Context) error {
+	if p == nil || p.client == nil || p.client.containerClient == nil {
+		return ErrDownSessionInvalid
+	}
+	if p.opts.Volumes && len(p.opts.Services) == 0 {
+		if err := p.client.removeProjectVolumes(ctx, p.projectName, p.attachedVolumeNames); err != nil {
 			return err
 		}
 	}
-	if len(opts.Services) == 0 && !hasRemainingProjectContainers(project.Name, containers, ids) {
-		if err := c.removeProjectNetworks(ctx, project.Name); err != nil {
+	if len(p.opts.Services) == 0 {
+		containers, err := p.client.containerClient.Container.ListSummaries(ctx, container.ListOptions{All: true})
+		if err != nil {
 			return err
 		}
+		if !hasRemainingProjectContainers(p.projectName, containers) {
+			if err := p.client.removeProjectNetworks(ctx, p.projectName); err != nil {
+				return err
+			}
+		}
 	}
-
 	return nil
 }
 
@@ -120,16 +179,10 @@ func (c *ComposeClient) removeProjectNetworks(ctx context.Context, projectName s
 	return nil
 }
 
-func hasRemainingProjectContainers(projectName string, containers []container.ContainerSummary, removedIDs []string) bool {
-	removed := make(map[string]struct{}, len(removedIDs))
-	for _, id := range removedIDs {
-		removed[id] = struct{}{}
-	}
+func hasRemainingProjectContainers(projectName string, containers []container.ContainerSummary) bool {
 	for _, item := range containers {
 		if item.Labels[accProjectLabel] == projectName {
-			if _, willRemove := removed[item.ID]; !willRemove {
-				return true
-			}
+			return true
 		}
 	}
 	return false
@@ -289,7 +342,6 @@ func downContainerIDs(project *types.Project, services []string, containers []co
 		if item.Labels[accProjectLabel] != project.Name {
 			continue
 		}
-
 		serviceName := item.Labels[accServiceLabel]
 		_, isActive := activeServices[serviceName]
 		_, isRequested := requestedServices[serviceName]

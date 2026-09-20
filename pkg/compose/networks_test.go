@@ -253,10 +253,15 @@ services:
 `)
 
 	var calls [][]string
+	listCalls := 0
 	run := func(_ context.Context, args ...string) (string, error) {
 		calls = append(calls, append([]string(nil), args...))
 		switch {
 		case reflect.DeepEqual(args, []string{"list", "--format", "json", "--all"}):
+			listCalls++
+			if listCalls > 1 {
+				return "[]", nil
+			}
 			return `[{"configuration":{"id":"demo_app_1","labels":{"` + accProjectLabel + `":"demo","` + accServiceLabel + `":"app"}}}]`, nil
 		case reflect.DeepEqual(args, []string{"network", "list", "--format", "json"}):
 			return `[

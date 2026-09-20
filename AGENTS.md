@@ -40,6 +40,11 @@ public `pkg` SDK.
 - Do not add support for a Compose field unless it can be mapped accurately to
   Apple's `container` CLI. Return `ErrUnsupportedFeature` with useful context
   for unsupported input.
+- Keep `pkg/container` and `pkg/compose` independent of ACC CLI and CoreDNS
+  infrastructure. They must not import `internal/cli` or `internal/coredns`,
+  or create, delete, or discover CoreDNS containers. Required Compose
+  ownership labels remain part of `pkg/compose`; ACC/CoreDNS lifecycle
+  coordination belongs in `internal/cli`.
 
 ## Package-specific guidance
 

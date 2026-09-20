@@ -29,10 +29,10 @@ type rootOptions struct {
 
 // NewRootCommand creates the root command for acc.
 func NewRootCommand() *cobra.Command {
-	return newRootCommand(newComposeClient, runUp)
+	return newRootCommand(newComposeClient, runUp, runDown)
 }
 
-func newRootCommand(newComposeClient func() (composeService, error), executeUp func(context.Context, string, compose.ParseOptions, compose.UpOptions, bool) error) *cobra.Command {
+func newRootCommand(newComposeClient func() (composeService, error), executeUp func(context.Context, string, compose.ParseOptions, compose.UpOptions, bool) error, executeDown func(context.Context, string, compose.ParseOptions, compose.DownOptions) error) *cobra.Command {
 	opts := &rootOptions{}
 
 	rootCmd := &cobra.Command{
@@ -54,7 +54,7 @@ func newRootCommand(newComposeClient func() (composeService, error), executeUp f
 
 	rootCmd.AddCommand(
 		newUpCommand(opts, executeUp),
-		newDownCommand(opts, newComposeClient),
+		newDownCommand(opts, executeDown),
 		newBuildCommand(opts, newComposeClient),
 		newLogsCommand(opts, newComposeClient),
 	)
@@ -122,7 +122,7 @@ func newUpCommand(rootOpts *rootOptions, executeUp func(context.Context, string,
 	return cmd
 }
 
-func newDownCommand(rootOpts *rootOptions, newComposeClient func() (composeService, error)) *cobra.Command {
+func newDownCommand(rootOpts *rootOptions, executeDown func(context.Context, string, compose.ParseOptions, compose.DownOptions) error) *cobra.Command {
 	var removeOrphans bool
 	var volumes bool
 
@@ -130,19 +130,25 @@ func newDownCommand(rootOpts *rootOptions, newComposeClient func() (composeServi
 		Use:   "down [SERVICE...]",
 		Short: "Stop and remove services",
 		RunE: func(cmd *cobra.Command, services []string) error {
-			client, path, parseOpts, err := prepareCommand(rootOpts, newComposeClient)
+			path, err := resolveComposePath(rootOpts.files, rootOpts.projectDirectory)
 			if err != nil {
 				return err
 			}
+			parseOpts := compose.ParseOptions{
+				ProjectName: rootOpts.projectName,
+				WorkingDir:  rootOpts.projectDirectory,
+				EnvFiles:    rootOpts.envFiles,
+			}
 			output := cmd.OutOrStdout()
-			return client.Down(cmd.Context(), path, parseOpts, compose.DownOptions{
+			downOpts := compose.DownOptions{
 				Services:      services,
 				RemoveOrphans: removeOrphans,
 				Volumes:       volumes,
 				OnWarning: func(message string) {
 					_ = writeWarning(output, !rootOpts.noColor, message)
 				},
-			})
+			}
+			return executeDown(cmd.Context(), path, parseOpts, downOpts)
 		},
 	}
 	cmd.Flags().BoolVar(&removeOrphans, "remove-orphans", false, "Remove containers for services not declared in the Compose file")

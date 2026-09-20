@@ -16,6 +16,7 @@ func TestUpMarksFatalDiagnosticAsReported(t *testing.T) {
 		func(ctx context.Context, path string, parseOpts compose.ParseOptions, opts compose.UpOptions, _ bool) error {
 			return client.Up(ctx, path, parseOpts, opts)
 		},
+		func(context.Context, string, compose.ParseOptions, compose.DownOptions) error { return nil },
 	)
 	var output bytes.Buffer
 	root.SetOut(&output)
@@ -42,6 +43,7 @@ func TestUpPassesNoCoreDNSOption(t *testing.T) {
 			noCoreDNS = skipCoreDNS
 			return nil
 		},
+		func(context.Context, string, compose.ParseOptions, compose.DownOptions) error { return nil },
 	)
 	root.SetArgs([]string{"up", "--no-coredns", "--file", "compose.yaml"})
 
@@ -50,6 +52,26 @@ func TestUpPassesNoCoreDNSOption(t *testing.T) {
 	}
 	if !noCoreDNS {
 		t.Fatal("up command did not receive NoCoreDNS")
+	}
+}
+
+func TestDownPassesOptions(t *testing.T) {
+	var got compose.DownOptions
+	root := newRootCommand(
+		func() (composeService, error) { return fatalDiagnosticComposeClient{}, nil },
+		func(context.Context, string, compose.ParseOptions, compose.UpOptions, bool) error { return nil },
+		func(_ context.Context, _ string, _ compose.ParseOptions, opts compose.DownOptions) error {
+			got = opts
+			return nil
+		},
+	)
+	root.SetArgs([]string{"down", "--remove-orphans", "--volumes", "--file", "compose.yaml"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !got.RemoveOrphans || !got.Volumes {
+		t.Fatalf("DownOptions = %#v, want RemoveOrphans and Volumes", got)
 	}
 }
 

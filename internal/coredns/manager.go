@@ -115,6 +115,37 @@ func (m *Manager) Start(ctx context.Context, projectName string, networkNames []
 	return networkIPv4Addresses(details[0].Networks, networks)
 }
 
+// Remove stops and deletes this project's CoreDNS container. It identifies the
+// container by ACC's project and CoreDNS-role labels so it cannot remove a
+// similarly named container owned by another application.
+func (m *Manager) Remove(ctx context.Context, projectName string, force bool) error {
+	if m == nil || m.runtime == nil {
+		return fmt.Errorf("CoreDNS manager is not initialized")
+	}
+	projectName = strings.TrimSpace(projectName)
+	if projectName == "" {
+		return fmt.Errorf("CoreDNS project name cannot be empty")
+	}
+
+	containers, err := m.runtime.Container.ListSummaries(ctx, container.ListOptions{All: true})
+	if err != nil {
+		return fmt.Errorf("list CoreDNS containers: %w", err)
+	}
+	for _, item := range containers {
+		if item.Labels[projectLabel] != projectName || item.Labels[roleLabel] != coreDNSRole {
+			continue
+		}
+		if _, err := m.runtime.Container.Stop(ctx, container.StopOptions{IDs: []string{item.ID}}); err != nil && !isNotFoundLikeError(err) {
+			return fmt.Errorf("stop CoreDNS container %q: %w", item.ID, err)
+		}
+		if _, err := m.runtime.Container.Delete(ctx, container.DeleteOptions{IDs: []string{item.ID}, Force: force}); err != nil && !isNotFoundLikeError(err) {
+			return fmt.Errorf("delete CoreDNS container %q: %w", item.ID, err)
+		}
+		return nil
+	}
+	return nil
+}
+
 // validNetworkNames trims, validates, deduplicates, and sorts network names.
 func validNetworkNames(raw []string) ([]string, error) {
 	set := make(map[string]struct{}, len(raw))
@@ -157,4 +188,12 @@ func networkIPv4Addresses(attachments []container.NetworkAttachment, networks []
 		}
 	}
 	return addresses, nil
+}
+
+func isNotFoundLikeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "not found") || strings.Contains(message, "no such")
 }

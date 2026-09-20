@@ -69,3 +69,39 @@ func TestNetworkIPv4Addresses(t *testing.T) {
 		t.Fatalf("address = %s, want %s", got["demo_default"], want)
 	}
 }
+
+func TestManagerRemoveDeletesOnlyLabeledCoreDNS(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	var calls [][]string
+	run := func(_ context.Context, args ...string) (string, error) {
+		calls = append(calls, append([]string(nil), args...))
+		switch {
+		case reflect.DeepEqual(args, []string{"list", "--format", "json", "--all"}):
+			return `[
+  {"configuration":{"id":"demo_app_1","labels":{"` + projectLabel + `":"demo"}}},
+  {"configuration":{"id":"demo-coredns","labels":{"` + projectLabel + `":"demo","` + roleLabel + `":"` + coreDNSRole + `"}}}
+]`, nil
+		case reflect.DeepEqual(args, []string{"stop", "demo-coredns"}),
+			reflect.DeepEqual(args, []string{"delete", "demo-coredns"}):
+			return "", nil
+		default:
+			t.Fatalf("unexpected command: %#v", args)
+			return "", nil
+		}
+	}
+	manager, err := NewManager(&container.Client{Container: container.NewContainerClient(run, nil)}, ManagerOptions{StatePath: statePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Remove(context.Background(), "demo", false); err != nil {
+		t.Fatalf("Remove() error = %v", err)
+	}
+	want := [][]string{
+		{"list", "--format", "json", "--all"},
+		{"stop", "demo-coredns"},
+		{"delete", "demo-coredns"},
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls = %#v, want %#v", calls, want)
+	}
+}
