@@ -31,9 +31,7 @@ type ManagerOptions struct {
 	Image string
 }
 
-// Manager starts a dedicated CoreDNS container for one Compose project.
-// It deliberately does not reuse an existing CoreDNS container: reconciliation
-// of a changed Compose topology is a later, explicit lifecycle feature.
+// Manager reconciles a dedicated CoreDNS container for one Compose project.
 type Manager struct {
 	runtime   *container.Client
 	statePath string
@@ -58,9 +56,11 @@ func NewManager(runtime *container.Client, opts ManagerOptions) (*Manager, error
 	return &Manager{runtime: runtime, statePath: opts.StatePath, image: image}, nil
 }
 
-// Start creates a CoreDNS container named <project>-coredns on every supplied
-// runtime network and returns its IPv4 address for each network. state.json
-// must already exist and be valid; the host-side state store owns its creation.
+// Start returns the IPv4 addresses of this project's CoreDNS container on each
+// supplied runtime network. It reuses exactly one existing ACC-owned CoreDNS
+// container only when it is already attached to every required network;
+// otherwise it creates a new container. state.json must already exist and be
+// valid; the host-side state store owns its creation.
 func (m *Manager) Start(ctx context.Context, projectName string, networkNames []string) (map[string]netip.Addr, error) {
 	if m == nil || m.runtime == nil {
 		return nil, fmt.Errorf("CoreDNS manager is not initialized")
@@ -84,9 +84,21 @@ func (m *Manager) Start(ctx context.Context, projectName string, networkNames []
 		return nil, fmt.Errorf("CoreDNS state path must be a regular file")
 	}
 
+	coreDNSIDs, _, err := m.projectContainerIDs(ctx, projectName)
+	if err != nil {
+		return nil, err
+	}
+	switch len(coreDNSIDs) {
+	case 0:
+		// Create the container below.
+	case 1:
+		return m.inspectReusableContainer(ctx, projectName, coreDNSIDs[0], networks)
+	default:
+		return nil, coreDNSReconciliationError(projectName, fmt.Sprintf("found %d ACC-managed CoreDNS containers", len(coreDNSIDs)))
+	}
+
 	name := projectName + "-coredns"
 
-	// Start the coreDNS container
 	_, err = m.runtime.Container.Run(ctx, m.image, container.CreateOptions{
 		Name: name,
 		Labels: map[string]string{
@@ -104,15 +116,59 @@ func (m *Manager) Start(ctx context.Context, projectName string, networkNames []
 	if err != nil {
 		return nil, fmt.Errorf("start CoreDNS container %q: %w", name, err)
 	}
+	return m.inspectContainer(ctx, name, networks)
+}
 
-	details, err := m.runtime.Container.InspectDetails(ctx, []string{name})
+func (m *Manager) inspectReusableContainer(ctx context.Context, projectName, id string, networks []string) (map[string]netip.Addr, error) {
+	details, err := m.inspectContainerDetails(ctx, id)
 	if err != nil {
-		return nil, fmt.Errorf("inspect CoreDNS container %q: %w", name, err)
+		return nil, fmt.Errorf("inspect existing CoreDNS container %q: %w", id, err)
+	}
+	if missing := missingNetworkNames(details.Networks, networks); len(missing) > 0 {
+		return nil, coreDNSReconciliationError(projectName, fmt.Sprintf("existing CoreDNS container is not attached to required network %q", missing[0]))
+	}
+	addresses, err := networkIPv4Addresses(details.Networks, networks)
+	if err != nil {
+		return nil, coreDNSReconciliationError(projectName, fmt.Sprintf("existing CoreDNS container has unusable network addressing: %v", err))
+	}
+	return addresses, nil
+}
+
+func (m *Manager) inspectContainer(ctx context.Context, id string, networks []string) (map[string]netip.Addr, error) {
+	details, err := m.inspectContainerDetails(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("inspect CoreDNS container %q: %w", id, err)
+	}
+	return networkIPv4Addresses(details.Networks, networks)
+}
+
+func (m *Manager) inspectContainerDetails(ctx context.Context, id string) (container.ContainerDetails, error) {
+	details, err := m.runtime.Container.InspectDetails(ctx, []string{id})
+	if err != nil {
+		return container.ContainerDetails{}, err
 	}
 	if len(details) != 1 || details[0].ID == "" {
-		return nil, fmt.Errorf("inspect CoreDNS container %q: expected one identified container", name)
+		return container.ContainerDetails{}, fmt.Errorf("expected one identified container")
 	}
-	return networkIPv4Addresses(details[0].Networks, networks)
+	return details[0], nil
+}
+
+func missingNetworkNames(attachments []container.NetworkAttachment, required []string) []string {
+	attached := make(map[string]struct{}, len(attachments))
+	for _, attachment := range attachments {
+		attached[attachment.Name] = struct{}{}
+	}
+	missing := make([]string, 0)
+	for _, networkName := range required {
+		if _, found := attached[networkName]; !found {
+			missing = append(missing, networkName)
+		}
+	}
+	return missing
+}
+
+func coreDNSReconciliationError(projectName, reason string) error {
+	return fmt.Errorf("cannot reconcile CoreDNS for project %q: %s; run `acc down --remove-orphans` using the earlier Compose file, then run `acc up` again", projectName, reason)
 }
 
 // RemoveIfUnused stops and deletes this project's CoreDNS containers only

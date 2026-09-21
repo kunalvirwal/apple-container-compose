@@ -35,6 +35,7 @@ type DownSession struct {
 	projectName         string
 	serviceIDs          []string
 	attachedVolumeNames map[string]struct{}
+	retainedVolumeNames map[string]struct{}
 	opts                DownOptions
 }
 
@@ -82,6 +83,7 @@ func (c *ComposeClient) PrepareDown(ctx context.Context, path string, parseOpts 
 
 	serviceIDs := downContainerIDs(project, services, containers, opts.RemoveOrphans)
 	attachedVolumeNames := make(map[string]struct{})
+	retainedVolumeNames := make(map[string]struct{})
 	if opts.Volumes && len(opts.Services) == 0 && len(serviceIDs) > 0 {
 		details, err := c.containerClient.Container.InspectDetails(ctx, serviceIDs)
 		if err != nil {
@@ -96,11 +98,29 @@ func (c *ComposeClient) PrepareDown(ctx context.Context, path string, parseOpts 
 			}
 		}
 	}
+	if opts.Volumes && len(opts.Services) == 0 && !opts.RemoveOrphans {
+		retainedOrphanIDs := orphanContainerIDs(project, containers)
+		if len(retainedOrphanIDs) > 0 {
+			details, err := c.containerClient.Container.InspectDetails(ctx, retainedOrphanIDs)
+			if err != nil {
+				if !isNotFoundLikeError(err) {
+					return nil, err
+				}
+			} else {
+				for _, item := range details {
+					for _, name := range item.VolumeNames {
+						retainedVolumeNames[name] = struct{}{}
+					}
+				}
+			}
+		}
+	}
 	return &DownSession{
 		client:              c,
 		projectName:         project.Name,
 		serviceIDs:          append([]string(nil), serviceIDs...),
 		attachedVolumeNames: attachedVolumeNames,
+		retainedVolumeNames: retainedVolumeNames,
 		opts:                opts,
 	}, nil
 }
@@ -134,13 +154,32 @@ func (p *DownSession) RemoveServices(ctx context.Context) error {
 // RemoveResources removes eligible project volumes and networks after service
 // containers and any application-managed infrastructure are gone.
 func (p *DownSession) RemoveResources(ctx context.Context) error {
+	if err := p.RemoveVolumes(ctx); err != nil {
+		return err
+	}
+	return p.RemoveNetworks(ctx)
+}
+
+// RemoveVolumes removes eligible project volumes after the selected service
+// containers are gone. Named volumes still mounted by retained orphans are
+// left intact.
+func (p *DownSession) RemoveVolumes(ctx context.Context) error {
 	if p == nil || p.client == nil || p.client.containerClient == nil {
 		return ErrDownSessionInvalid
 	}
 	if p.opts.Volumes && len(p.opts.Services) == 0 {
-		if err := p.client.removeProjectVolumes(ctx, p.projectName, p.attachedVolumeNames); err != nil {
+		if err := p.client.removeProjectVolumes(ctx, p.projectName, p.attachedVolumeNames, p.retainedVolumeNames); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// RemoveNetworks removes eligible project networks after service containers
+// and application-managed infrastructure are gone.
+func (p *DownSession) RemoveNetworks(ctx context.Context) error {
+	if p == nil || p.client == nil || p.client.containerClient == nil {
+		return ErrDownSessionInvalid
 	}
 	if len(p.opts.Services) == 0 {
 		containers, err := p.client.containerClient.Container.ListSummaries(ctx, container.ListOptions{All: true})
@@ -188,11 +227,12 @@ func hasRemainingProjectContainers(projectName string, containers []container.Co
 	return false
 }
 
-// removeProjectVolumes removes all project-managed named volumes plus the
-// explicitly-created anonymous volumes mounted by containers removed in this
-// Down invocation. Detached anonymous volumes are retained: without their
-// former container there is no safe association with this teardown.
-func (c *ComposeClient) removeProjectVolumes(ctx context.Context, projectName string, attachedVolumeNames map[string]struct{}) error {
+// removeProjectVolumes removes all project-managed named volumes that are not
+// mounted by retained orphan containers, plus explicitly-created anonymous
+// volumes mounted by containers removed in this Down invocation. Detached
+// anonymous volumes are retained: without their former container there is no
+// safe association with this teardown.
+func (c *ComposeClient) removeProjectVolumes(ctx context.Context, projectName string, attachedVolumeNames, retainedVolumeNames map[string]struct{}) error {
 	volumes, err := c.containerClient.Volumes.ListSummaries(ctx)
 	if err != nil {
 		return err
@@ -201,6 +241,9 @@ func (c *ComposeClient) removeProjectVolumes(ctx context.Context, projectName st
 	names := make([]string, 0)
 	for _, volume := range volumes {
 		if volume.Labels[accProjectLabel] != projectName || volume.Labels[accVolumeLabel] == "" {
+			continue
+		}
+		if _, retained := retainedVolumeNames[volume.Name]; retained {
 			continue
 		}
 		if isAnonymousVolume(projectName, volume) {
@@ -223,6 +266,31 @@ func (c *ComposeClient) removeProjectVolumes(ctx context.Context, projectName st
 func isAnonymousVolume(projectName string, volume container.VolumeSummary) bool {
 	prefix := "acc-" + projectName + "-anon-"
 	return strings.HasPrefix(volume.Name, prefix) && volume.Labels[accVolumeLabel] == volume.Name
+}
+
+// orphanContainerIDs returns the IDs of project service containers for
+// services that are no longer declared by the current Compose file.
+func orphanContainerIDs(project *types.Project, containers []container.ContainerSummary) []string {
+	activeServices := make(map[string]struct{}, len(project.Services))
+	for serviceName := range project.Services {
+		activeServices[serviceName] = struct{}{}
+	}
+
+	ids := make([]string, 0)
+	for _, item := range containers {
+		if item.Labels[accProjectLabel] != project.Name {
+			continue
+		}
+		serviceName := strings.TrimSpace(item.Labels[accServiceLabel])
+		if serviceName == "" {
+			continue
+		}
+		if _, active := activeServices[serviceName]; !active {
+			ids = append(ids, item.ID)
+		}
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // generateDownServiceOrder returns selected services and their transitive

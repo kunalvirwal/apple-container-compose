@@ -838,6 +838,52 @@ services:
 	}
 }
 
+func TestDownVolumesRetainsNamedVolumeMountedByOrphan(t *testing.T) {
+	_, composePath := writeVolumeCompose(t, `name: demo
+services:
+  app:
+    image: alpine
+`)
+
+	const currentVolume = "demo_current"
+	const orphanVolume = "demo_orphan"
+	var calls [][]string
+	run := func(_ context.Context, args ...string) (string, error) {
+		calls = append(calls, append([]string(nil), args...))
+		switch {
+		case reflect.DeepEqual(args, []string{"list", "--format", "json", "--all"}):
+			return `[
+  {"configuration":{"id":"demo_app_1","labels":{"` + accProjectLabel + `":"demo","` + accServiceLabel + `":"app"}}},
+  {"configuration":{"id":"demo_old_1","labels":{"` + accProjectLabel + `":"demo","` + accServiceLabel + `":"old"}}}
+]`, nil
+		case reflect.DeepEqual(args, []string{"inspect", "demo_app_1"}):
+			return `[{"configuration":{"id":"demo_app_1","mounts":[{"type":{"volume":{"name":"` + currentVolume + `"}}}]}}]`, nil
+		case reflect.DeepEqual(args, []string{"inspect", "demo_old_1"}):
+			return `[{"configuration":{"id":"demo_old_1","mounts":[{"type":{"volume":{"name":"` + orphanVolume + `"}}}]}}]`, nil
+		case reflect.DeepEqual(args, []string{"volume", "list", "--format", "json"}):
+			return `[
+  {"id":"` + currentVolume + `","configuration":{"name":"` + currentVolume + `","labels":{"` + accProjectLabel + `":"demo","` + accVolumeLabel + `":"current"}}},
+  {"id":"` + orphanVolume + `","configuration":{"name":"` + orphanVolume + `","labels":{"` + accProjectLabel + `":"demo","` + accVolumeLabel + `":"orphan"}}}
+]`, nil
+		default:
+			return "", nil
+		}
+	}
+
+	client := newVolumeTestClient(run)
+	if err := client.Down(context.Background(), composePath, ParseOptions{}, DownOptions{Volumes: true}); err != nil {
+		t.Fatalf("Down() error = %v", err)
+	}
+	if !hasCall(calls, []string{"volume", "delete", currentVolume}) {
+		t.Fatalf("Down() calls = %#v, want current named volume deleted", calls)
+	}
+	for _, call := range calls {
+		if len(call) >= 3 && call[0] == "volume" && call[1] == "delete" && hasArgument(call, orphanVolume) {
+			t.Fatalf("Down() calls = %#v, must retain named volume %q mounted by orphan", calls, orphanVolume)
+		}
+	}
+}
+
 func TestUpDoesNotCreateAnotherAnonymousVolumeForExistingService(t *testing.T) {
 	_, composePath := writeVolumeCompose(t, `name: demo
 services:

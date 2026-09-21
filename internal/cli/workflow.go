@@ -15,6 +15,10 @@ type dnsManager interface {
 	Start(context.Context, string, []string) (map[string]netip.Addr, error)
 }
 
+type dnsRemover interface {
+	RemoveIfUnused(context.Context, string, bool) error
+}
+
 // runUp starts the services defined by a Compose file, optionally configuring ACC-managed CoreDNS infrastructure.
 func runUp(ctx context.Context, path string, parseOpts compose.ParseOptions, opts compose.UpOptions, noCoreDNS bool) error {
 	runtime, err := container.NewClient()
@@ -67,6 +71,27 @@ func runDown(ctx context.Context, path string, parseOpts compose.ParseOptions, o
 	if err != nil {
 		return err
 	}
+	if len(opts.Services) > 0 {
+		return composeClient.Down(ctx, path, parseOpts, opts)
+	}
+	coreDNSManager, err := coredns.NewManager(runtime, coredns.ManagerOptions{StatePath: statePath})
+	if err != nil {
+		return err
+	}
+	return downServicesWithCoreDNS(ctx, composeClient, coreDNSManager, path, parseOpts, opts)
+}
+
+// downServicesWithCoreDNS coordinates service and project-resource teardown
+// around ACC-owned DNS infrastructure. Volume removal precedes DNS removal so
+// a complete teardown occurs in service, volume, DNS, then network order.
+func downServicesWithCoreDNS(ctx context.Context, composeClient *compose.ComposeClient, dns dnsRemover, path string, parseOpts compose.ParseOptions, opts compose.DownOptions) error {
+	if composeClient == nil {
+		return fmt.Errorf("down has no Compose client")
+	}
+	if dns == nil {
+		return fmt.Errorf("down has no CoreDNS manager")
+	}
+
 	session, err := composeClient.PrepareDown(ctx, path, parseOpts, opts)
 	if err != nil {
 		return err
@@ -74,16 +99,15 @@ func runDown(ctx context.Context, path string, parseOpts compose.ParseOptions, o
 	if err := session.RemoveServices(ctx); err != nil {
 		return err
 	}
+	if err := session.RemoveVolumes(ctx); err != nil {
+		return err
+	}
 	if len(opts.Services) == 0 {
-		coreDNSManager, err := coredns.NewManager(runtime, coredns.ManagerOptions{StatePath: statePath})
-		if err != nil {
-			return err
-		}
-		if err := coreDNSManager.RemoveIfUnused(ctx, session.ProjectName(), opts.Force); err != nil {
+		if err := dns.RemoveIfUnused(ctx, session.ProjectName(), opts.Force); err != nil {
 			return err
 		}
 	}
-	return session.RemoveResources(ctx)
+	return session.RemoveNetworks(ctx)
 }
 
 // startServicesWithCoreDNS coordinates ACC-owned DNS infrastructure around the

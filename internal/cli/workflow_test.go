@@ -68,12 +68,77 @@ func TestStartServicesWithCoreDNSStartsCoreDNSBeforeServices(t *testing.T) {
 	}
 }
 
+func TestDownServicesWithCoreDNSRemovesResourcesInOrder(t *testing.T) {
+	composePath := writeWorkflowCompose(t)
+	var events []string
+	listCalls := 0
+	run := func(_ context.Context, args ...string) (string, error) {
+		switch {
+		case reflect.DeepEqual(args, []string{"list", "--format", "json", "--all"}):
+			listCalls++
+			if listCalls == 1 {
+				return `[
+  {"configuration":{"id":"demo_app_1","labels":{"io.github.kunalvirwal.acc.project":"demo","io.github.kunalvirwal.acc.service":"app"}}},
+  {"configuration":{"id":"demo_old_1","labels":{"io.github.kunalvirwal.acc.project":"demo","io.github.kunalvirwal.acc.service":"old"}}}
+]`, nil
+			}
+			return "[]", nil
+		case reflect.DeepEqual(args, []string{"inspect", "demo_app_1", "demo_old_1"}):
+			return `[
+  {"configuration":{"id":"demo_app_1","mounts":[{"type":{"volume":{"name":"demo_appdata"}}}]}},
+  {"configuration":{"id":"demo_old_1","mounts":[{"type":{"volume":{"name":"demo_olddata"}}}]}}
+]`, nil
+		case reflect.DeepEqual(args, []string{"volume", "list", "--format", "json"}):
+			return `[
+  {"id":"demo_appdata","configuration":{"name":"demo_appdata","labels":{"io.github.kunalvirwal.acc.project":"demo","io.github.kunalvirwal.acc.volume":"appdata"}}},
+  {"id":"demo_olddata","configuration":{"name":"demo_olddata","labels":{"io.github.kunalvirwal.acc.project":"demo","io.github.kunalvirwal.acc.volume":"olddata"}}}
+]`, nil
+		case reflect.DeepEqual(args, []string{"volume", "delete", "demo_appdata", "demo_olddata"}):
+			events = append(events, "volumes")
+			return "", nil
+		case reflect.DeepEqual(args, []string{"network", "list", "--format", "json"}):
+			return `[{"configuration":{"name":"demo_default","labels":{"io.github.kunalvirwal.acc.project":"demo","io.github.kunalvirwal.acc.network":"default"}}}]`, nil
+		case reflect.DeepEqual(args, []string{"network", "delete", "demo_default"}):
+			events = append(events, "networks")
+			return "", nil
+		default:
+			return "", nil
+		}
+	}
+	composeClient, err := compose.NewComposeClient(compose.WithContainerClient(&container.Client{
+		Container: container.NewContainerClient(run, nil),
+		Volumes:   container.NewVolumeClient(run),
+		Networks:  container.NewNetworkClient(run),
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dns := recordingDNSRemover{onRemove: func() { events = append(events, "coredns") }}
+	if err := downServicesWithCoreDNS(context.Background(), composeClient, dns, composePath, compose.ParseOptions{}, compose.DownOptions{RemoveOrphans: true, Volumes: true}); err != nil {
+		t.Fatalf("downServicesWithCoreDNS() error = %v", err)
+	}
+	if want := []string{"volumes", "coredns", "networks"}; !reflect.DeepEqual(events, want) {
+		t.Fatalf("resource removal order = %#v, want %#v", events, want)
+	}
+}
+
 type recordingDNSStarter struct {
 	calls        int
 	project      string
 	networks     []string
 	dnsByNetwork map[string]netip.Addr
 	onStart      func()
+}
+
+type recordingDNSRemover struct {
+	onRemove func()
+}
+
+func (r recordingDNSRemover) RemoveIfUnused(context.Context, string, bool) error {
+	if r.onRemove != nil {
+		r.onRemove()
+	}
+	return nil
 }
 
 func (s *recordingDNSStarter) Start(_ context.Context, project string, networks []string) (map[string]netip.Addr, error) {

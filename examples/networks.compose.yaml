@@ -7,19 +7,25 @@ services:
     command: ["sh", "-c", "while true; do echo frontend-ready; sleep 5; done"]
     networks:
       - public
+    volumes:
+      - /data
 
   backend:
     image: alpine:3.20
     command: ["sh", "-c", "while true; do echo backend-ready; sleep 5; done"]
     networks:
       - private
+    volumes:
+      - type: volume
+        source: app-data
+        target: /var/lib/app
 
   relay:
     image: alpine:3.20
     command: ["sh", "-c", "while true; do echo relay-ready; sleep 5; done"]
     depends_on:
       - frontend
-      - backend
+      # - backend
     # ACC passes one --network flag for each listed network. Aliases belong
     # only to the network on which they are declared.
     networks:
@@ -52,3 +58,6 @@ networks:
   # shared:
   #   external: true
   #   name: existing-network
+
+volumes:
+  app-data:
