@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/kunalvirwal/apple-container-compose/pkg/container"
@@ -122,10 +123,10 @@ services:
 `,
 			assert: func(t *testing.T, _ string, calls [][]string) {
 				t.Helper()
-				if len(calls) != 3 || !reflect.DeepEqual(calls[0], []string{"list", "--format", "json", "--all"}) {
-					t.Fatalf("calls = %#v, want container list, volume create, run", calls)
+				if len(calls) != 2 {
+					t.Fatalf("calls = %#v, want volume create and run", calls)
 				}
-				created := calls[1]
+				created := calls[0]
 				if len(created) != 7 || !reflect.DeepEqual(created[:4], []string{"volume", "create", "--label", accProjectLabel + "=demo"}) {
 					t.Fatalf("create args = %#v", created)
 				}
@@ -136,8 +137,8 @@ services:
 				if created[5] != accVolumeLabel+"="+volumeName {
 					t.Fatalf("anonymous volume label = %q", created[5])
 				}
-				if !hasArgument(calls[2], "type=volume,source="+volumeName+",target=/cache") {
-					t.Fatalf("run args = %#v", calls[2])
+				if !hasArgument(calls[1], "type=volume,source="+volumeName+",target=/cache") {
+					t.Fatalf("run args = %#v", calls[1])
 				}
 			},
 		},
@@ -203,7 +204,7 @@ services:
 			if err := client.Up(context.Background(), composePath, ParseOptions{}, UpOptions{}); err != nil {
 				t.Fatalf("Up() error = %v", err)
 			}
-			tt.assert(t, projectDir, calls)
+			tt.assert(t, projectDir, withoutContainerListCalls(calls))
 		})
 	}
 }
@@ -759,6 +760,7 @@ volumes:
 	if err := newVolumeTestClient(run).Up(context.Background(), composePath, ParseOptions{}, UpOptions{}); err != nil {
 		t.Fatalf("Up() error = %v", err)
 	}
+	calls = withoutContainerListCalls(calls)
 	if len(calls) != 4 {
 		t.Fatalf("calls = %#v, want inspect, create, and two runs", calls)
 	}
@@ -884,7 +886,7 @@ services:
 	}
 }
 
-func TestUpDoesNotCreateAnotherAnonymousVolumeForExistingService(t *testing.T) {
+func TestUpReusesAnonymousVolumeWhenMigratingExistingService(t *testing.T) {
 	_, composePath := writeVolumeCompose(t, `name: demo
 services:
   app:
@@ -892,9 +894,23 @@ services:
     volumes:
       - /cache
 `)
+	const anonymousVolume = "acc-demo-anon-11111111111111111111111111111111"
+	var calls [][]string
 	run := func(_ context.Context, args ...string) (string, error) {
-		if reflect.DeepEqual(args, []string{"list", "--format", "json", "--all"}) {
+		calls = append(calls, append([]string(nil), args...))
+		switch {
+		case reflect.DeepEqual(args, []string{"list", "--format", "json", "--all"}),
+			reflect.DeepEqual(args, []string{"list", "--format", "json"}):
 			return `[{"configuration":{"id":"demo_app_1","labels":{"` + accProjectLabel + `":"demo","` + accServiceLabel + `":"app"}}}]`, nil
+		case reflect.DeepEqual(args, []string{"inspect", "demo_app_1"}):
+			return `[{"configuration":{"id":"demo_app_1","mounts":[{"type":{"volume":{"name":"` + anonymousVolume + `"}},"destination":"/cache"}]}}]`, nil
+		case reflect.DeepEqual(args, []string{"volume", "inspect", anonymousVolume}):
+			return `[{"configuration":{"name":"` + anonymousVolume + `","labels":{"` + accProjectLabel + `":"demo","` + accVolumeLabel + `":"` + anonymousVolume + `"}}}]`, nil
+		case reflect.DeepEqual(args, []string{"stop", "demo_app_1"}),
+			reflect.DeepEqual(args, []string{"delete", "demo_app_1"}):
+			return "", nil
+		case len(args) > 0 && args[0] == "run":
+			return "demo_app_1", nil
 		}
 		t.Fatalf("unexpected runtime call: %#v", args)
 		return "", nil
@@ -902,6 +918,90 @@ services:
 
 	if err := newVolumeTestClient(run).Up(context.Background(), composePath, ParseOptions{}, UpOptions{}); err != nil {
 		t.Fatalf("Up() error = %v", err)
+	}
+	for _, call := range calls {
+		if len(call) >= 2 && call[0] == "volume" && call[1] == "create" {
+			t.Fatalf("runtime calls = %#v, must not create another anonymous volume", calls)
+		}
+	}
+	foundRun := false
+	for _, call := range calls {
+		if len(call) > 0 && call[0] == "run" {
+			foundRun = true
+			if !hasArgument(call, "type=volume,source="+anonymousVolume+",target=/cache") {
+				t.Fatalf("run args = %#v, want preserved anonymous volume", call)
+			}
+		}
+	}
+	if !foundRun {
+		t.Fatalf("runtime calls = %#v, want legacy service recreation", calls)
+	}
+}
+
+func TestUpRenewsAnonymousVolumeOnRequest(t *testing.T) {
+	_, composePath := writeVolumeCompose(t, `name: demo
+services:
+  app:
+    image: alpine
+    volumes:
+      - /cache
+`)
+	const oldVolume = "acc-demo-anon-11111111111111111111111111111111"
+	currentOptions := container.CreateOptions{
+		Name: "demo_app_1",
+		Labels: map[string]string{
+			accProjectLabel: "demo",
+			accServiceLabel: "app",
+		},
+		Networks: []string{"demo_default"},
+		Mounts: []container.Mount{{
+			Type:   container.MountTypeVolume,
+			Source: oldVolume,
+			Target: "/cache",
+		}},
+	}
+	currentHash, err := serviceConfigHash("alpine", currentOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var calls [][]string
+	run := func(_ context.Context, args ...string) (string, error) {
+		calls = append(calls, append([]string(nil), args...))
+		switch {
+		case reflect.DeepEqual(args, []string{"list", "--format", "json", "--all"}),
+			reflect.DeepEqual(args, []string{"list", "--format", "json"}):
+			return `[{"configuration":{"id":"demo_app_1","labels":{"` + accProjectLabel + `":"demo","` + accServiceLabel + `":"app","` + accConfigHashLabel + `":"` + currentHash + `"}}}]`, nil
+		case reflect.DeepEqual(args, []string{"inspect", "demo_app_1"}):
+			return `[{"configuration":{"id":"demo_app_1","mounts":[{"type":{"volume":{"name":"` + oldVolume + `"}},"destination":"/cache"}]}}]`, nil
+		case reflect.DeepEqual(args, []string{"stop", "demo_app_1"}),
+			reflect.DeepEqual(args, []string{"delete", "demo_app_1"}):
+			return "", nil
+		case len(args) > 1 && args[0] == "volume" && args[1] == "create":
+			return "", nil
+		case len(args) > 0 && args[0] == "run":
+			return "demo_app_1", nil
+		default:
+			t.Fatalf("unexpected runtime call: %#v", args)
+			return "", nil
+		}
+	}
+	if err := newVolumeTestClient(run).Up(context.Background(), composePath, ParseOptions{}, UpOptions{RenewAnonymousVolumes: true}); err != nil {
+		t.Fatalf("Up() error = %v", err)
+	}
+	var newVolume string
+	for _, call := range calls {
+		if len(call) > 2 && call[0] == "volume" && call[1] == "create" {
+			newVolume = call[len(call)-1]
+		}
+	}
+	if newVolume == "" || newVolume == oldVolume {
+		t.Fatalf("runtime calls = %#v, want a fresh anonymous volume", calls)
+	}
+	for _, call := range calls {
+		if len(call) > 0 && call[0] == "run" && !hasArgument(call, "type=volume,source="+newVolume+",target=/cache") {
+			t.Fatalf("run args = %#v, want renewed anonymous volume", call)
+		}
 	}
 }
 
@@ -917,6 +1017,7 @@ func newVolumeTestClient(run func(context.Context, ...string) (string, error)) *
 	}
 	return &ComposeClient{containerClient: &container.Client{
 		Container: container.NewContainerClient(run, nil),
+		Images:    newTestImageClient(),
 		Volumes:   container.NewVolumeClient(run),
 		Networks:  container.NewNetworkClient(networkRun),
 	}}
@@ -942,10 +1043,34 @@ func hasArgument(args []string, want string) bool {
 }
 
 func hasCall(calls [][]string, want []string) bool {
+	want = withoutConfigHashLabel(want)
 	for _, call := range calls {
-		if reflect.DeepEqual(call, want) {
+		if reflect.DeepEqual(withoutConfigHashLabel(call), want) {
 			return true
 		}
 	}
 	return false
+}
+
+func withoutConfigHashLabel(args []string) []string {
+	result := make([]string, 0, len(args))
+	for index := 0; index < len(args); index++ {
+		if args[index] == "--label" && index+1 < len(args) && strings.HasPrefix(args[index+1], accConfigHashLabel+"=") {
+			index++
+			continue
+		}
+		result = append(result, args[index])
+	}
+	return result
+}
+
+func withoutContainerListCalls(calls [][]string) [][]string {
+	result := make([][]string, 0, len(calls))
+	for _, call := range calls {
+		if len(call) > 0 && call[0] == "list" {
+			continue
+		}
+		result = append(result, call)
+	}
+	return result
 }

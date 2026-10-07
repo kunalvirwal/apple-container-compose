@@ -74,6 +74,33 @@ func validateNetworks(project *types.Project, services []string, onFatalWarning 
 	return networks, nil
 }
 
+// validateNetworkOwnership checks runtime network collisions and required
+// external networks before Up creates any project resources.
+func (c *ComposeClient) validateNetworkOwnership(ctx context.Context, project *types.Project, networks map[string]composeNetwork, onFatalWarning func(string)) error {
+	logicalNames := make([]string, 0, len(networks))
+	for name := range networks {
+		logicalNames = append(logicalNames, name)
+	}
+	sort.Strings(logicalNames)
+	for _, logicalName := range logicalNames {
+		network := networks[logicalName]
+		summary, exists, err := c.containerClient.Networks.InspectSummary(ctx, network.runtimeName)
+		if err != nil {
+			return fmt.Errorf("inspect network %q: %w", network.runtimeName, err)
+		}
+		if network.external {
+			if !exists {
+				return fmt.Errorf("external network %q does not exist", network.runtimeName)
+			}
+			continue
+		}
+		if exists && (summary.Labels[accProjectLabel] != project.Name || summary.Labels[accNetworkLabel] != logicalName) {
+			return fatalUnsupportedFeature(onFatalWarning, fmt.Sprintf("network %q already exists but is not owned by ACC project %q; choose a different project name", network.runtimeName, project.Name))
+		}
+	}
+	return nil
+}
+
 // ensureNetworks creates project-managed networks and returns sorted runtime
 // network names for every service.
 func (c *ComposeClient) ensureNetworks(ctx context.Context, project *types.Project, networks map[string]composeNetwork, onFatalWarning func(string)) (map[string][]string, error) {
@@ -116,6 +143,10 @@ func (c *ComposeClient) ensureNetworks(ctx context.Context, project *types.Proje
 		}
 	}
 
+	return serviceNetworkNames(project, networks), nil
+}
+
+func serviceNetworkNames(project *types.Project, networks map[string]composeNetwork) map[string][]string {
 	serviceNetworks := make(map[string][]string, len(project.Services))
 	for serviceName, service := range project.Services {
 		logicalServiceNetworks := make([]string, 0, len(service.Networks))
@@ -129,5 +160,5 @@ func (c *ComposeClient) ensureNetworks(ctx context.Context, project *types.Proje
 		}
 		serviceNetworks[serviceName] = runtimeNames
 	}
-	return serviceNetworks, nil
+	return serviceNetworks
 }

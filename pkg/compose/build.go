@@ -56,13 +56,17 @@ func (c *ComposeClient) buildProject(ctx context.Context, project *types.Project
 
 // buildService builds one service when it declares a build configuration.
 func (c *ComposeClient) buildService(ctx context.Context, project *types.Project, serviceName string, service types.ServiceConfig, output io.Writer) error {
+	_, err := c.buildServiceImage(ctx, project, serviceName, service, output)
+	return err
+}
+
+func (c *ComposeClient) buildServiceImage(ctx context.Context, project *types.Project, serviceName string, service types.ServiceConfig, output io.Writer) (string, error) {
 	if service.Build == nil {
-		return nil
+		return "", nil
 	}
 
 	containerBuildOptions := toImageBuildOptions(project, serviceName, service)
-	_, err := c.containerClient.Images.Build(ctx, containerBuildOptions, output)
-	return err
+	return c.containerClient.Images.Build(ctx, containerBuildOptions, output)
 }
 
 // toImageBuildOptions converts a compose service build section into container build options.

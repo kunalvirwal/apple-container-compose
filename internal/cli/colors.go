@@ -57,6 +57,23 @@ func writeFatalWarning(target io.Writer, enabled bool, message string) error {
 	return err
 }
 
+func writeReconcileLine(target io.Writer, message string) error {
+	line := "[ACC] " + message + "\n"
+	_, err := io.WriteString(target, line)
+	return err
+}
+
+type synchronizedWriter struct {
+	mu     sync.Mutex
+	target io.Writer
+}
+
+func (w *synchronizedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.target.Write(p)
+}
+
 type colorWriter struct {
 	target io.Writer
 	color  string
@@ -66,13 +83,11 @@ func (w *colorWriter) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	if _, err := io.WriteString(w.target, w.color); err != nil {
-		return 0, err
-	}
-	if _, err := w.target.Write(p); err != nil {
-		return 0, err
-	}
-	if _, err := io.WriteString(w.target, ansiReset); err != nil {
+	colored := make([]byte, 0, len(w.color)+len(p)+len(ansiReset))
+	colored = append(colored, w.color...)
+	colored = append(colored, p...)
+	colored = append(colored, ansiReset...)
+	if _, err := w.target.Write(colored); err != nil {
 		return 0, err
 	}
 	return len(p), nil
@@ -117,6 +132,9 @@ func serviceColor(line []byte) string {
 	end := bytes.IndexByte(line, ']')
 	if end <= 1 || end+1 >= len(line) || line[end+1] != ' ' {
 		return ""
+	}
+	if bytes.Equal(line[1:end], []byte("ACC")) {
+		return ansiPurple
 	}
 
 	hash := fnv.New32a()

@@ -16,6 +16,12 @@ type ImageClient struct {
 	runStreaming func(ctx context.Context, out io.Writer, args ...string) (string, error)
 }
 
+// ImageSummary is the stable local image identity needed by higher-level
+// clients when deciding whether an existing container uses the current image.
+type ImageSummary struct {
+	Digest string
+}
+
 func NewImageClient(
 	run func(ctx context.Context, args ...string) (string, error),
 	runStreaming func(ctx context.Context, out io.Writer, args ...string) (string, error),
@@ -58,14 +64,64 @@ func (i *ImageClient) List(ctx context.Context, quiet bool) (string, error) {
 
 // Exists reports whether an image reference is available in the local image store.
 func (i *ImageClient) Exists(ctx context.Context, reference string) (bool, error) {
+	_, exists, err := i.InspectSummary(ctx, reference)
+	return exists, err
+}
+
+// InspectSummary returns the descriptor digest for a local image and whether
+// the reference exists. It uses image inspect and therefore never pulls.
+func (i *ImageClient) InspectSummary(ctx context.Context, reference string) (ImageSummary, bool, error) {
+	if strings.TrimSpace(reference) == "" {
+		return ImageSummary{}, false, ErrInvalidOptions
+	}
 	out, err := i.run(ctx, "image", "inspect", reference)
-	if err == nil {
-		return true, nil
+	if err != nil {
+		if isImageNotFoundError(out, err) {
+			return ImageSummary{}, false, nil
+		}
+		return ImageSummary{}, false, err
 	}
-	if isImageNotFoundError(out, err) {
-		return false, nil
+	if strings.TrimSpace(out) == "" {
+		return ImageSummary{}, true, nil
 	}
-	return false, err
+	digest, err := imageDescriptorDigest([]byte(out))
+	if err != nil {
+		return ImageSummary{}, false, fmt.Errorf("decode image inspect output: %w", err)
+	}
+	return ImageSummary{Digest: digest}, true, nil
+}
+
+func imageDescriptorDigest(data []byte) (string, error) {
+	var value any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return "", err
+	}
+	return findImageDigest(value), nil
+}
+
+func findImageDigest(value any) string {
+	switch typed := value.(type) {
+	case map[string]any:
+		for _, key := range []string{"digest", "Digest"} {
+			if digest, ok := typed[key].(string); ok && strings.TrimSpace(digest) != "" {
+				return digest
+			}
+		}
+		for _, key := range []string{"descriptor", "Descriptor", "configuration", "Configuration"} {
+			if nested, ok := typed[key]; ok {
+				if digest := findImageDigest(nested); digest != "" {
+					return digest
+				}
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			if digest := findImageDigest(item); digest != "" {
+				return digest
+			}
+		}
+	}
+	return ""
 }
 
 func isImageNotFoundError(output string, err error) bool {

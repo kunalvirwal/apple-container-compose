@@ -55,6 +55,26 @@ func TestUpPassesNoCoreDNSOption(t *testing.T) {
 	}
 }
 
+func TestUpPassesReconciliationOptions(t *testing.T) {
+	var got compose.UpOptions
+	root := newRootCommand(
+		func() (composeService, error) { return fatalDiagnosticComposeClient{}, nil },
+		func(_ context.Context, _ string, _ compose.ParseOptions, opts compose.UpOptions, _ bool) error {
+			got = opts
+			return nil
+		},
+		func(context.Context, string, compose.ParseOptions, compose.DownOptions) error { return nil },
+	)
+	root.SetArgs([]string{"up", "-V", "--remove-orphans", "--file", "compose.yaml"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !got.RenewAnonymousVolumes || !got.RemoveOrphans {
+		t.Fatalf("UpOptions = %#v, want RenewAnonymousVolumes and RemoveOrphans", got)
+	}
+}
+
 func TestDownPassesOptions(t *testing.T) {
 	var got compose.DownOptions
 	root := newRootCommand(

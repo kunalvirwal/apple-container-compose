@@ -68,6 +68,9 @@ func (n *NetworkClient) ListSummaries(ctx context.Context) ([]NetworkSummary, er
 	if err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(out) == "" {
+		return []NetworkSummary{}, nil
+	}
 	return decodeNetworkSummaries(out)
 }
 

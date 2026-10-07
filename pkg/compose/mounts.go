@@ -428,21 +428,27 @@ func fatalUnsupportedFeature(onFatalWarning func(string), message string) error 
 	return fmt.Errorf("%w: %s", ErrUnsupportedFeature, message)
 }
 
-func prepareNamedVolumes(ctx context.Context, project *types.Project, services []string, client *container.VolumeClient, onWarning func(string), existingAnonymousServices map[string]bool) (map[string][]string, error) {
+type upVolumePlan struct {
+	anonymousVolumes map[string][]string
+	create           []container.VolumeCreateOptions
+}
+
+func planNamedVolumes(ctx context.Context, project *types.Project, services []string, client *container.VolumeClient, onWarning func(string), existingAnonymousVolumes map[string]map[string]string, renewAnonymousVolumes bool) (upVolumePlan, error) {
+	plan := upVolumePlan{anonymousVolumes: make(map[string][]string)}
 	volumeNames, err := referencedNamedVolumes(project, services)
 	if err != nil {
-		return nil, err
+		return upVolumePlan{}, err
 	}
 	for _, volumeName := range volumeNames {
 		volume := project.Volumes[volumeName]
 		runtimeName := composeVolumeName(project, volumeName, volume)
 		summary, exists, err := client.InspectSummary(ctx, runtimeName)
 		if err != nil {
-			return nil, fmt.Errorf("inspect volume %q: %w", runtimeName, err)
+			return upVolumePlan{}, fmt.Errorf("inspect volume %q: %w", runtimeName, err)
 		}
 		if volume.External {
 			if !exists {
-				return nil, fmt.Errorf("external volume %q does not exist", runtimeName)
+				return upVolumePlan{}, fmt.Errorf("external volume %q does not exist", runtimeName)
 			}
 			continue
 		}
@@ -453,38 +459,44 @@ func prepareNamedVolumes(ctx context.Context, project *types.Project, services [
 
 		labels, err := configuredVolumeLabels(project, volumeName, nil)
 		if err != nil {
-			return nil, err
+			return upVolumePlan{}, err
 		}
 		labels[accProjectLabel] = project.Name
 		labels[accVolumeLabel] = volumeName
-		if _, err := client.Create(ctx, container.VolumeCreateOptions{
+		plan.create = append(plan.create, container.VolumeCreateOptions{
 			Name:    runtimeName,
 			Labels:  labels,
 			Options: volume.DriverOpts,
-		}); err != nil {
-			return nil, fmt.Errorf("create volume %q: %w", runtimeName, err)
-		}
+		})
 	}
 
-	anonymousVolumes := make(map[string][]string)
 	for _, serviceName := range services {
 		service, err := project.GetService(serviceName)
 		if err != nil {
-			return nil, err
+			return upVolumePlan{}, err
 		}
 		for _, volume := range service.Volumes {
 			if volume.Type != types.VolumeTypeVolume || volume.Source != "" {
 				continue
 			}
-			if existingAnonymousServices[serviceName] {
-				continue
-			}
 			if err := validateServiceVolume(project, serviceName, volume); err != nil {
-				return nil, err
+				return upVolumePlan{}, err
+			}
+			if !renewAnonymousVolumes {
+				if runtimeName := existingAnonymousVolumes[serviceName][volume.Target]; runtimeName != "" {
+					summary, exists, err := client.InspectSummary(ctx, runtimeName)
+					if err != nil {
+						return upVolumePlan{}, fmt.Errorf("inspect anonymous volume %q: %w", runtimeName, err)
+					}
+					if exists && isAnonymousVolume(project.Name, summary) {
+						plan.anonymousVolumes[serviceName] = append(plan.anonymousVolumes[serviceName], runtimeName)
+						continue
+					}
+				}
 			}
 			runtimeName, err := anonymousVolumeName(project.Name)
 			if err != nil {
-				return nil, err
+				return upVolumePlan{}, err
 			}
 			labels := make(map[string]string, 2)
 			if volume.Volume != nil {
@@ -494,16 +506,23 @@ func prepareNamedVolumes(ctx context.Context, project *types.Project, services [
 			}
 			labels[accProjectLabel] = project.Name
 			labels[accVolumeLabel] = runtimeName
-			if _, err := client.Create(ctx, container.VolumeCreateOptions{
+			plan.create = append(plan.create, container.VolumeCreateOptions{
 				Name:   runtimeName,
 				Labels: labels,
-			}); err != nil {
-				return nil, fmt.Errorf("create anonymous volume %q: %w", runtimeName, err)
-			}
-			anonymousVolumes[serviceName] = append(anonymousVolumes[serviceName], runtimeName)
+			})
+			plan.anonymousVolumes[serviceName] = append(plan.anonymousVolumes[serviceName], runtimeName)
 		}
 	}
-	return anonymousVolumes, nil
+	return plan, nil
+}
+
+func (plan upVolumePlan) apply(ctx context.Context, client *container.VolumeClient) error {
+	for _, options := range plan.create {
+		if _, err := client.Create(ctx, options); err != nil {
+			return fmt.Errorf("create volume %q: %w", options.Name, err)
+		}
+	}
+	return nil
 }
 
 func warnUnmanagedVolume(onWarning func(string), projectName, volumeName, runtimeName string, summary container.VolumeSummary) {

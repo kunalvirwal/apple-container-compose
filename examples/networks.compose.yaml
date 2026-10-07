@@ -25,7 +25,7 @@ services:
     command: ["sh", "-c", "while true; do echo relay-ready; sleep 5; done"]
     depends_on:
       - frontend
-      # - backend
+      - backend
     # ACC passes one --network flag for each listed network. Aliases belong
     # only to the network on which they are declared.
     networks:

@@ -47,8 +47,18 @@ type ContainerSummary struct {
 // after inspecting a container.
 type ContainerDetails struct {
 	ID          string
+	ImageDigest string
 	VolumeNames []string
+	Mounts      []ContainerMount
 	Networks    []NetworkAttachment
+}
+
+// ContainerMount describes one configured container mount returned by inspect.
+type ContainerMount struct {
+	Type     MountType
+	Source   string
+	Target   string
+	ReadOnly bool
 }
 
 // NetworkAttachment describes a container's assigned addresses on one runtime
@@ -84,6 +94,9 @@ func (c *ContainerClient) ListSummaries(ctx context.Context, opts ListOptions) (
 	out, err := c.List(ctx, opts)
 	if err != nil {
 		return nil, err
+	}
+	if strings.TrimSpace(out) == "" {
+		return []ContainerSummary{}, nil
 	}
 
 	var response []struct {
@@ -131,9 +144,17 @@ func (c *ContainerClient) InspectDetails(ctx context.Context, ids []string) ([]C
 	var response []struct {
 		ID            string `json:"id"`
 		Configuration struct {
-			ID     string `json:"id"`
+			ID    string `json:"id"`
+			Image struct {
+				Descriptor struct {
+					Digest string `json:"digest"`
+				} `json:"descriptor"`
+			} `json:"image"`
 			Mounts []struct {
-				Type json.RawMessage `json:"type"`
+				Type        json.RawMessage `json:"type"`
+				Destination string          `json:"destination"`
+				Target      string          `json:"target"`
+				Options     []string        `json:"options"`
 			} `json:"mounts"`
 		} `json:"configuration"`
 		Status struct {
@@ -159,27 +180,87 @@ func (c *ContainerClient) InspectDetails(ctx context.Context, ids []string) ([]C
 		}
 
 		volumeNames := make([]string, 0)
+		var mounts []ContainerMount
 		for _, mount := range item.Configuration.Mounts {
 			var filesystemType struct {
 				Volume struct {
 					Name string `json:"name"`
 				} `json:"volume"`
+				Share struct {
+					Source string `json:"source"`
+				} `json:"share"`
+				Tmpfs json.RawMessage `json:"tmpfs"`
 			}
 			if err := json.Unmarshal(mount.Type, &filesystemType); err != nil {
 				return nil, fmt.Errorf("decode container inspect mount for %q: %w", id, err)
 			}
+			target := mount.Destination
+			if target == "" {
+				target = mount.Target
+			}
+			readOnly := false
+			for _, option := range mount.Options {
+				if option == "ro" || option == "readonly" {
+					readOnly = true
+					break
+				}
+			}
 			if filesystemType.Volume.Name != "" {
 				volumeNames = append(volumeNames, filesystemType.Volume.Name)
+				mounts = append(mounts, ContainerMount{
+					Type:     MountTypeVolume,
+					Source:   filesystemType.Volume.Name,
+					Target:   target,
+					ReadOnly: readOnly,
+				})
+				continue
+			}
+			if filesystemType.Share.Source != "" {
+				mounts = append(mounts, ContainerMount{
+					Type:     MountTypeBind,
+					Source:   filesystemType.Share.Source,
+					Target:   target,
+					ReadOnly: readOnly,
+				})
+				continue
+			}
+			if len(filesystemType.Tmpfs) > 0 && string(filesystemType.Tmpfs) != "null" {
+				mounts = append(mounts, ContainerMount{
+					Type:     MountTypeTmpfs,
+					Target:   target,
+					ReadOnly: readOnly,
+				})
 			}
 		}
 		sort.Strings(volumeNames)
+		sort.Slice(mounts, func(i, j int) bool {
+			if mounts[i].Target != mounts[j].Target {
+				return mounts[i].Target < mounts[j].Target
+			}
+			if mounts[i].Type != mounts[j].Type {
+				return mounts[i].Type < mounts[j].Type
+			}
+			return mounts[i].Source < mounts[j].Source
+		})
 		networks, err := decodeNetworkAttachments(item.Status.Networks)
 		if err != nil {
 			return nil, fmt.Errorf("decode container inspect networks for %q: %w", id, err)
 		}
-		details = append(details, ContainerDetails{ID: id, VolumeNames: volumeNames, Networks: networks})
+		details = append(details, ContainerDetails{ID: id, ImageDigest: item.Configuration.Image.Descriptor.Digest, VolumeNames: volumeNames, Mounts: mounts, Networks: networks})
 	}
 	return details, nil
+}
+
+// Start starts one stopped container.
+func (c *ContainerClient) Start(ctx context.Context, id string) (string, error) {
+	if strings.TrimSpace(id) == "" {
+		return "", ErrInvalidOptions
+	}
+	out, err := c.run(ctx, "start", id)
+	if err != nil && strings.Contains(out, "XPC connection error") {
+		return out, ErrSystemNotRunning
+	}
+	return out, err
 }
 
 func decodeNetworkAttachments(raw []struct {
@@ -320,6 +401,32 @@ const (
 
 // Run creates and starts a new container based on the provided image and options. Returns true if the container was successfully created and started, or an error if the operation fails.
 func (c *ContainerClient) Run(ctx context.Context, image string, opts CreateOptions) (bool, error) {
+	args, err := runArgs(image, opts)
+	if err != nil {
+		return false, err
+	}
+	out, err := c.run(ctx, args...)
+	if err != nil {
+		if strings.Contains(out, "XPC connection error") {
+			return false, ErrSystemNotRunning
+		} else if strings.Contains(out, "already exists") {
+			return false, ErrContainerNameExists
+		}
+	}
+	return true, err
+}
+
+// ValidateRunOptions checks the same create-time arguments that Run passes to
+// the external CLI, without starting a container.
+func ValidateRunOptions(image string, opts CreateOptions) error {
+	_, err := runArgs(image, opts)
+	return err
+}
+
+func runArgs(image string, opts CreateOptions) ([]string, error) {
+	if strings.TrimSpace(image) == "" {
+		return nil, ErrInvalidOptions
+	}
 	args := []string{"run"}
 
 	if opts.Name != "" {
@@ -332,11 +439,21 @@ func (c *ContainerClient) Run(ctx context.Context, image string, opts CreateOpti
 		size := opts.Memory[:len(opts.Memory)-1]
 		suffix := opts.Memory[len(opts.Memory)-1]
 		if suffix != 'K' && suffix != 'M' && suffix != 'G' && suffix != 'T' && suffix != 'P' {
-			return false, ErrInvalidOptions
+			return nil, ErrInvalidOptions
 		}
-		_, err := strconv.ParseUint(size, 10, 0)
+		amount, err := strconv.ParseUint(size, 10, 64)
 		if err != nil {
-			return false, ErrInvalidOptions
+			return nil, ErrInvalidOptions
+		}
+		minimum := uint64(1)
+		switch suffix {
+		case 'K':
+			minimum = 200 * 1024
+		case 'M':
+			minimum = 200
+		}
+		if amount < minimum {
+			return nil, fmt.Errorf("%w: memory %q is below Apple Container's 200 MiB minimum", ErrInvalidOptions, opts.Memory)
 		}
 		args = append(args, "--memory", opts.Memory)
 	}
@@ -345,7 +462,7 @@ func (c *ContainerClient) Run(ctx context.Context, image string, opts CreateOpti
 	}
 	nameservers, err := NormalizeNameservers(opts.Nameservers)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	for _, nameserver := range nameservers {
 		args = append(args, "--dns", nameserver)
@@ -366,7 +483,7 @@ func (c *ContainerClient) Run(ctx context.Context, image string, opts CreateOpti
 		sort.Strings(keys)
 		for _, key := range keys {
 			if strings.TrimSpace(key) == "" {
-				return false, ErrInvalidOptions
+				return nil, ErrInvalidOptions
 			}
 			args = append(args, "--label", key+"="+opts.Labels[key])
 		}
@@ -374,14 +491,14 @@ func (c *ContainerClient) Run(ctx context.Context, image string, opts CreateOpti
 	for _, networkName := range opts.Networks {
 		networkName = strings.TrimSpace(networkName)
 		if networkName == "" {
-			return false, ErrInvalidOptions
+			return nil, ErrInvalidOptions
 		}
 		args = append(args, "--network", networkName)
 	}
 	for _, mount := range opts.Mounts {
 		mountSpec, err := mount.spec()
 		if err != nil {
-			return false, err
+			return nil, err
 		}
 		args = append(args, "--mount", mountSpec)
 	}
@@ -391,7 +508,7 @@ func (c *ContainerClient) Run(ctx context.Context, image string, opts CreateOpti
 			if mapping.HostIP != "" {
 				ip := net.ParseIP(mapping.HostIP) // Validate the IP address
 				if ip == nil || ip.To4() == nil {
-					return false, ErrInvalidOptions
+					return nil, ErrInvalidOptions
 				}
 				portMapping += ip.String() + ":"
 			}
@@ -406,16 +523,7 @@ func (c *ContainerClient) Run(ctx context.Context, image string, opts CreateOpti
 	args = append(args, "-d")
 	args = append(args, image)
 	args = append(args, opts.Arguments...)
-
-	out, err := c.run(ctx, args...)
-	if err != nil {
-		if strings.Contains(out, "XPC connection error") {
-			return false, ErrSystemNotRunning
-		} else if strings.Contains(out, "already exists") {
-			return false, ErrContainerNameExists
-		}
-	}
-	return true, err
+	return args, nil
 }
 
 // NormalizeNameservers validates literal DNS server addresses and returns their

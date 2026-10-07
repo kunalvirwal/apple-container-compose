@@ -78,6 +78,8 @@ func newUpCommand(rootOpts *rootOptions, executeUp func(context.Context, string,
 	var build bool
 	var detach bool
 	var noCoreDNS bool
+	var removeOrphans bool
+	var renewAnonymousVolumes bool
 
 	cmd := &cobra.Command{
 		Use:   "up [SERVICE...]",
@@ -92,14 +94,16 @@ func newUpCommand(rootOpts *rootOptions, executeUp func(context.Context, string,
 				WorkingDir:  rootOpts.projectDirectory,
 				EnvFiles:    rootOpts.envFiles,
 			}
-			output := cmd.OutOrStdout()
+			output := &synchronizedWriter{target: cmd.OutOrStdout()}
 			fatalDiagnosticRendered := false
 			upOpts := compose.UpOptions{
-				Services:    services,
-				Build:       build,
-				Output:      newServiceLogWriter(output, !rootOpts.noColor),
-				BuildOutput: newBuildLogWriter(output, !rootOpts.noColor),
-				Attach:      !detach,
+				Services:              services,
+				Build:                 build,
+				RenewAnonymousVolumes: renewAnonymousVolumes,
+				RemoveOrphans:         removeOrphans,
+				Output:                newServiceLogWriter(output, !rootOpts.noColor),
+				BuildOutput:           newBuildLogWriter(output, !rootOpts.noColor),
+				Attach:                !detach,
 				OnWarning: func(message string) {
 					_ = writeWarning(output, !rootOpts.noColor, message)
 				},
@@ -119,6 +123,8 @@ func newUpCommand(rootOpts *rootOptions, executeUp func(context.Context, string,
 	cmd.Flags().BoolVar(&build, "build", false, "Build images before starting services")
 	cmd.Flags().BoolVarP(&detach, "detach", "d", false, "Run services in the background")
 	cmd.Flags().BoolVar(&noCoreDNS, "no-coredns", false, "Do not start ACC CoreDNS; pass service dns entries directly to containers")
+	cmd.Flags().BoolVar(&removeOrphans, "remove-orphans", false, "Remove containers for services not declared in the Compose file")
+	cmd.Flags().BoolVarP(&renewAnonymousVolumes, "renew-anon-volumes", "V", false, "Recreate anonymous volumes instead of retrieving data from previous containers")
 	return cmd
 }
 

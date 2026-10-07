@@ -3,6 +3,8 @@ package coredns
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net/netip"
 	"os"
@@ -15,6 +17,7 @@ import (
 
 const (
 	projectLabel = "io.github.kunalvirwal.acc.project"
+	serviceLabel = "io.github.kunalvirwal.acc.service"
 	roleLabel    = "io.github.kunalvirwal.acc.role"
 	coreDNSRole  = "coredns"
 	defaultImage = "docker.io/kunalvirwal/acc-coredns:v2"
@@ -33,9 +36,11 @@ type ManagerOptions struct {
 
 // Manager reconciles a dedicated CoreDNS container for one Compose project.
 type Manager struct {
-	runtime   *container.Client
-	statePath string
-	image     string
+	runtime       *container.Client
+	statePath     string
+	image         string
+	activeProject string
+	activeID      string
 }
 
 // NewManager constructs a CoreDNS manager using the given container runtime.
@@ -58,9 +63,10 @@ func NewManager(runtime *container.Client, opts ManagerOptions) (*Manager, error
 
 // Start returns the IPv4 addresses of this project's CoreDNS container on each
 // supplied runtime network. It reuses exactly one existing ACC-owned CoreDNS
-// container only when it is already attached to every required network;
-// otherwise it creates a new container. state.json must already exist and be
-// valid; the host-side state store owns its creation.
+// container when its network set matches exactly. For a changed network set,
+// it starts a second container and leaves the old one serving existing
+// services until FinalizeMigration can safely retire it. state.json must
+// already exist and be valid; the host-side state store owns its creation.
 func (m *Manager) Start(ctx context.Context, projectName string, networkNames []string) (map[string]netip.Addr, error) {
 	if m == nil || m.runtime == nil {
 		return nil, fmt.Errorf("CoreDNS manager is not initialized")
@@ -88,16 +94,41 @@ func (m *Manager) Start(ctx context.Context, projectName string, networkNames []
 	if err != nil {
 		return nil, err
 	}
-	switch len(coreDNSIDs) {
-	case 0:
-		// Create the container below.
-	case 1:
-		return m.inspectReusableContainer(ctx, projectName, coreDNSIDs[0], networks)
-	default:
-		return nil, coreDNSReconciliationError(projectName, fmt.Sprintf("found %d ACC-managed CoreDNS containers", len(coreDNSIDs)))
+	for _, id := range coreDNSIDs {
+		details, err := m.inspectContainerDetails(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("inspect existing CoreDNS container %q: %w", id, err)
+		}
+		if sameNetworkNames(details.Networks, networks) {
+			running, err := m.containerIsRunning(ctx, id)
+			if err != nil {
+				return nil, err
+			}
+			if !running {
+				if _, err := m.runtime.Container.Start(ctx, id); err != nil {
+					return nil, fmt.Errorf("start existing CoreDNS container %q: %w", id, err)
+				}
+				details, err = m.inspectContainerDetails(ctx, id)
+				if err != nil {
+					return nil, fmt.Errorf("inspect started CoreDNS container %q: %w", id, err)
+				}
+			}
+			addresses, err := networkIPv4Addresses(details.Networks, networks)
+			if err != nil {
+				return nil, coreDNSReconciliationError(projectName, fmt.Sprintf("existing CoreDNS container has unusable network addressing: %v", err))
+			}
+			m.activeProject, m.activeID = projectName, id
+			return addresses, nil
+		}
 	}
 
 	name := projectName + "-coredns"
+	if len(coreDNSIDs) > 0 {
+		name, err = nextCoreDNSName(projectName)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	_, err = m.runtime.Container.Run(ctx, m.image, container.CreateOptions{
 		Name: name,
@@ -116,30 +147,24 @@ func (m *Manager) Start(ctx context.Context, projectName string, networkNames []
 	if err != nil {
 		return nil, fmt.Errorf("start CoreDNS container %q: %w", name, err)
 	}
-	return m.inspectContainer(ctx, name, networks)
-}
-
-func (m *Manager) inspectReusableContainer(ctx context.Context, projectName, id string, networks []string) (map[string]netip.Addr, error) {
-	details, err := m.inspectContainerDetails(ctx, id)
+	details, err := m.inspectContainerDetails(ctx, name)
 	if err != nil {
-		return nil, fmt.Errorf("inspect existing CoreDNS container %q: %w", id, err)
-	}
-	if missing := missingNetworkNames(details.Networks, networks); len(missing) > 0 {
-		return nil, coreDNSReconciliationError(projectName, fmt.Sprintf("existing CoreDNS container is not attached to required network %q", missing[0]))
+		return nil, fmt.Errorf("inspect CoreDNS container %q: %w", name, err)
 	}
 	addresses, err := networkIPv4Addresses(details.Networks, networks)
 	if err != nil {
-		return nil, coreDNSReconciliationError(projectName, fmt.Sprintf("existing CoreDNS container has unusable network addressing: %v", err))
+		return nil, err
 	}
+	m.activeProject, m.activeID = projectName, details.ID
 	return addresses, nil
 }
 
-func (m *Manager) inspectContainer(ctx context.Context, id string, networks []string) (map[string]netip.Addr, error) {
-	details, err := m.inspectContainerDetails(ctx, id)
-	if err != nil {
-		return nil, fmt.Errorf("inspect CoreDNS container %q: %w", id, err)
+func nextCoreDNSName(projectName string) (string, error) {
+	var random [8]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("generate CoreDNS container name: %w", err)
 	}
-	return networkIPv4Addresses(details.Networks, networks)
+	return projectName + "-coredns-" + hex.EncodeToString(random[:]), nil
 }
 
 func (m *Manager) inspectContainerDetails(ctx context.Context, id string) (container.ContainerDetails, error) {
@@ -153,18 +178,33 @@ func (m *Manager) inspectContainerDetails(ctx context.Context, id string) (conta
 	return details[0], nil
 }
 
-func missingNetworkNames(attachments []container.NetworkAttachment, required []string) []string {
+func sameNetworkNames(attachments []container.NetworkAttachment, required []string) bool {
 	attached := make(map[string]struct{}, len(attachments))
 	for _, attachment := range attachments {
 		attached[attachment.Name] = struct{}{}
 	}
-	missing := make([]string, 0)
+	if len(attached) != len(required) {
+		return false
+	}
 	for _, networkName := range required {
 		if _, found := attached[networkName]; !found {
-			missing = append(missing, networkName)
+			return false
 		}
 	}
-	return missing
+	return true
+}
+
+func (m *Manager) containerIsRunning(ctx context.Context, id string) (bool, error) {
+	containers, err := m.runtime.Container.ListSummaries(ctx, container.ListOptions{})
+	if err != nil {
+		return false, fmt.Errorf("list running CoreDNS containers: %w", err)
+	}
+	for _, item := range containers {
+		if item.ID == id {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func coreDNSReconciliationError(projectName, reason string) error {
@@ -191,6 +231,127 @@ func (m *Manager) RemoveIfUnused(ctx context.Context, projectName string, force 
 		return nil
 	}
 	return m.removeContainers(ctx, coreDNSIDs, force)
+}
+
+// RemoveAfterDirectDNS removes project CoreDNS after the selected services have
+// been reconciled with direct DNS. It retains CoreDNS when any other project
+// container may still depend on it, such as an unselected service or orphan.
+// The bool reports whether all project CoreDNS containers are absent afterward.
+func (m *Manager) RemoveAfterDirectDNS(ctx context.Context, projectName string, reconciledServices []string) (bool, error) {
+	if m == nil || m.runtime == nil {
+		return false, fmt.Errorf("CoreDNS manager is not initialized")
+	}
+	projectName = strings.TrimSpace(projectName)
+	if projectName == "" {
+		return false, fmt.Errorf("CoreDNS project name cannot be empty")
+	}
+	coreDNSIDs, unreconciledContainer, err := m.migrationContainers(ctx, projectName, reconciledServices)
+	if err != nil {
+		return false, err
+	}
+	if len(coreDNSIDs) == 0 {
+		return true, nil
+	}
+	if unreconciledContainer {
+		return false, nil
+	}
+	if err := m.removeRunningOrStopped(ctx, coreDNSIDs); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// FinalizeMigration retires older CoreDNS generations after selected services
+// have been reconciled. It keeps them if an unselected service or orphan may
+// still use an old DNS address. The bool reports whether older generations
+// were retired and obsolete networks may now be cleaned up.
+func (m *Manager) FinalizeMigration(ctx context.Context, projectName string, reconciledServices []string) (bool, error) {
+	if m == nil || m.runtime == nil {
+		return false, fmt.Errorf("CoreDNS manager is not initialized")
+	}
+	if projectName == "" || m.activeProject != projectName || m.activeID == "" {
+		return false, fmt.Errorf("CoreDNS migration has no active container for project %q", projectName)
+	}
+	coreDNSIDs, unreconciledContainer, err := m.migrationContainers(ctx, projectName, reconciledServices)
+	if err != nil {
+		return false, err
+	}
+	activeFound := false
+	older := make([]string, 0, len(coreDNSIDs))
+	for _, id := range coreDNSIDs {
+		if id == m.activeID {
+			activeFound = true
+		} else {
+			older = append(older, id)
+		}
+	}
+	if !activeFound {
+		return false, fmt.Errorf("active CoreDNS container %q is missing", m.activeID)
+	}
+	if unreconciledContainer {
+		return false, nil
+	}
+	if err := m.removeRunningOrStopped(ctx, older); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (m *Manager) migrationContainers(ctx context.Context, projectName string, reconciledServices []string) ([]string, bool, error) {
+	selected := make(map[string]struct{}, len(reconciledServices))
+	for _, name := range reconciledServices {
+		selected[name] = struct{}{}
+	}
+	containers, err := m.runtime.Container.ListSummaries(ctx, container.ListOptions{All: true})
+	if err != nil {
+		return nil, false, fmt.Errorf("list CoreDNS containers: %w", err)
+	}
+	coreDNSIDs := make([]string, 0)
+	unreconciledContainer := false
+	for _, item := range containers {
+		if item.Labels[projectLabel] != projectName {
+			continue
+		}
+		if item.Labels[roleLabel] == coreDNSRole {
+			coreDNSIDs = append(coreDNSIDs, item.ID)
+			continue
+		}
+		if _, ok := selected[item.Labels[serviceLabel]]; !ok {
+			unreconciledContainer = true
+		}
+	}
+	sort.Strings(coreDNSIDs)
+	return coreDNSIDs, unreconciledContainer, nil
+}
+
+func (m *Manager) removeRunningOrStopped(ctx context.Context, coreDNSIDs []string) error {
+	if len(coreDNSIDs) == 0 {
+		return nil
+	}
+	runningContainers, err := m.runtime.Container.ListSummaries(ctx, container.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list running CoreDNS containers: %w", err)
+	}
+	wanted := make(map[string]struct{}, len(coreDNSIDs))
+	for _, id := range coreDNSIDs {
+		wanted[id] = struct{}{}
+	}
+	runningIDs := make([]string, 0, len(coreDNSIDs))
+	for _, item := range runningContainers {
+		if _, found := wanted[item.ID]; found {
+			runningIDs = append(runningIDs, item.ID)
+		}
+	}
+	sort.Strings(runningIDs)
+	if len(runningIDs) > 0 {
+		if _, err := m.runtime.Container.Stop(ctx, container.StopOptions{IDs: runningIDs}); err != nil && !isNotFoundLikeError(err) {
+			return fmt.Errorf("stop CoreDNS containers: %w", err)
+		}
+	}
+	if _, err := m.runtime.Container.Delete(ctx, container.DeleteOptions{IDs: coreDNSIDs}); err != nil && !isNotFoundLikeError(err) {
+		return fmt.Errorf("delete CoreDNS containers: %w", err)
+	}
+	return nil
 }
 
 func (m *Manager) projectContainerIDs(ctx context.Context, projectName string) ([]string, bool, error) {

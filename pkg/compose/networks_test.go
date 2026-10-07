@@ -28,6 +28,7 @@ services:
 	}
 	client := &ComposeClient{containerClient: &container.Client{
 		Container: container.NewContainerClient(run, nil),
+		Images:    newTestImageClient(),
 		Volumes:   container.NewVolumeClient(run),
 		Networks:  container.NewNetworkClient(run),
 	}}
@@ -89,6 +90,7 @@ networks:
 	}
 	client := &ComposeClient{containerClient: &container.Client{
 		Container: container.NewContainerClient(run, nil),
+		Images:    newTestImageClient(),
 		Volumes:   container.NewVolumeClient(run),
 		Networks:  container.NewNetworkClient(run),
 	}}
@@ -141,6 +143,7 @@ networks:
 	}
 	client := &ComposeClient{containerClient: &container.Client{
 		Container: container.NewContainerClient(run, nil),
+		Images:    newTestImageClient(),
 		Volumes:   container.NewVolumeClient(run),
 		Networks:  container.NewNetworkClient(run),
 	}}
@@ -192,6 +195,7 @@ networks:
 	}
 	client := &ComposeClient{containerClient: &container.Client{
 		Container: container.NewContainerClient(run, nil),
+		Images:    newTestImageClient(),
 		Volumes:   container.NewVolumeClient(run),
 		Networks:  container.NewNetworkClient(run),
 	}}
@@ -225,6 +229,7 @@ services:
 	}
 	client := &ComposeClient{containerClient: &container.Client{
 		Container: container.NewContainerClient(run, nil),
+		Images:    newTestImageClient(),
 		Volumes:   container.NewVolumeClient(run),
 		Networks:  container.NewNetworkClient(run),
 	}}
@@ -242,6 +247,88 @@ services:
 	}
 	if len(calls) != 1 || !reflect.DeepEqual(calls[0], []string{"network", "inspect", "demo_default"}) {
 		t.Fatalf("calls = %#v, want only network inspect", calls)
+	}
+}
+
+func TestUpRecreatesServiceAndRemovesObsoleteNetwork(t *testing.T) {
+	_, composePath := writeVolumeCompose(t, `name: demo
+services:
+  app:
+    image: alpine
+    networks:
+      - current
+networks:
+  current:
+`)
+	oldOptions := container.CreateOptions{
+		Name: "demo_app_1",
+		Labels: map[string]string{
+			accProjectLabel: "demo",
+			accServiceLabel: "app",
+		},
+		Networks: []string{"demo_old"},
+	}
+	oldHash, err := serviceConfigHash("alpine", oldOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var containerCalls [][]string
+	containerRun := func(_ context.Context, args ...string) (string, error) {
+		containerCalls = append(containerCalls, append([]string(nil), args...))
+		switch {
+		case reflect.DeepEqual(args, []string{"list", "--format", "json", "--all"}),
+			reflect.DeepEqual(args, []string{"list", "--format", "json"}):
+			return `[{"configuration":{"id":"demo_app_1","labels":{"` + accProjectLabel + `":"demo","` + accServiceLabel + `":"app","` + accConfigHashLabel + `":"` + oldHash + `"}}}]`, nil
+		case reflect.DeepEqual(args, []string{"inspect", "demo_app_1"}):
+			return `[{"configuration":{"id":"demo_app_1","mounts":[]},"status":{"networks":[{"network":"demo_old","ipv4Address":"192.168.64.3/24"}]}}]`, nil
+		default:
+			return "", nil
+		}
+	}
+	var networkCalls [][]string
+	networkRun := func(_ context.Context, args ...string) (string, error) {
+		networkCalls = append(networkCalls, append([]string(nil), args...))
+		switch {
+		case reflect.DeepEqual(args, []string{"network", "inspect", "demo_current"}):
+			return `[{"configuration":{"name":"demo_current","labels":{"` + accProjectLabel + `":"demo","` + accNetworkLabel + `":"current"}}}]`, nil
+		case reflect.DeepEqual(args, []string{"network", "list", "--format", "json"}):
+			return `[
+  {"configuration":{"name":"demo_current","labels":{"` + accProjectLabel + `":"demo","` + accNetworkLabel + `":"current"}}},
+  {"configuration":{"name":"demo_old","labels":{"` + accProjectLabel + `":"demo","` + accNetworkLabel + `":"old"}}}
+]`, nil
+		default:
+			return "", nil
+		}
+	}
+	client := &ComposeClient{containerClient: &container.Client{
+		Container: container.NewContainerClient(containerRun, nil),
+		Images:    newTestImageClient(),
+		Volumes:   container.NewVolumeClient(containerRun),
+		Networks:  container.NewNetworkClient(networkRun),
+	}}
+	if err := client.Up(context.Background(), composePath, ParseOptions{}, UpOptions{}); err != nil {
+		t.Fatalf("Up() error = %v", err)
+	}
+	for _, want := range [][]string{
+		{"stop", "demo_app_1"},
+		{"delete", "demo_app_1"},
+	} {
+		if !hasCall(containerCalls, want) {
+			t.Fatalf("container calls = %#v, want %#v", containerCalls, want)
+		}
+	}
+	foundCurrentRun := false
+	for _, call := range containerCalls {
+		if len(call) > 0 && call[0] == "run" {
+			foundCurrentRun = hasArgument(call, "demo_current") && !hasArgument(call, "demo_old")
+		}
+	}
+	if !foundCurrentRun {
+		t.Fatalf("container calls = %#v, want recreation only on demo_current", containerCalls)
+	}
+	if !hasCall(networkCalls, []string{"network", "delete", "demo_old"}) {
+		t.Fatalf("network calls = %#v, want obsolete network removal", networkCalls)
 	}
 }
 
@@ -274,6 +361,7 @@ services:
 	}
 	client := &ComposeClient{containerClient: &container.Client{
 		Container: container.NewContainerClient(run, nil),
+		Images:    newTestImageClient(),
 		Volumes:   container.NewVolumeClient(run),
 		Networks:  container.NewNetworkClient(run),
 	}}
@@ -308,6 +396,7 @@ services:
 	}
 	client := &ComposeClient{containerClient: &container.Client{
 		Container: container.NewContainerClient(run, nil),
+		Images:    newTestImageClient(),
 		Volumes:   container.NewVolumeClient(run),
 		Networks:  container.NewNetworkClient(run),
 	}}

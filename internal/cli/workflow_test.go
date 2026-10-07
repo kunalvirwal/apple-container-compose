@@ -3,10 +3,12 @@ package cli
 import (
 	"context"
 	"errors"
+	"io"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/kunalvirwal/apple-container-compose/pkg/compose"
@@ -25,6 +27,7 @@ func TestStartServicesWithCoreDNSStartsCoreDNSBeforeServices(t *testing.T) {
 	}
 	composeClient, err := compose.NewComposeClient(compose.WithContainerClient(&container.Client{
 		Container: container.NewContainerClient(run, nil),
+		Images:    container.NewImageClient(run, nil),
 		Volumes:   container.NewVolumeClient(run),
 		Networks:  container.NewNetworkClient(run),
 	}))
@@ -33,6 +36,14 @@ func TestStartServicesWithCoreDNSStartsCoreDNSBeforeServices(t *testing.T) {
 	}
 	starter := &recordingDNSStarter{
 		dnsByNetwork: map[string]netip.Addr{"demo_default": netip.MustParseAddr("192.168.64.2")},
+		onFinalize: func() {
+			for _, call := range calls {
+				if len(call) > 0 && call[0] == "run" {
+					return
+				}
+			}
+			t.Fatal("CoreDNS migration finalized before service startup")
+		},
 		onStart: func() {
 			wantCreate := []string{
 				"network", "create",
@@ -66,6 +77,90 @@ func TestStartServicesWithCoreDNSStartsCoreDNSBeforeServices(t *testing.T) {
 	if !containsCommand(calls, wantRun) {
 		t.Fatalf("runtime calls = %#v, want %#v", calls, wantRun)
 	}
+}
+
+func TestStartServicesWithoutCoreDNSCleansUpBeforeAttachedLogWait(t *testing.T) {
+	composePath := writeWorkflowCompose(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var events []string
+	run := func(commandCtx context.Context, args ...string) (string, error) {
+		switch {
+		case reflect.DeepEqual(args, []string{"network", "inspect", "demo_default"}):
+			return `[{"configuration":{"name":"demo_default","labels":{"io.github.kunalvirwal.acc.project":"demo","io.github.kunalvirwal.acc.network":"default"}}}]`, nil
+		case reflect.DeepEqual(args, []string{"network", "list", "--format", "json"}):
+			return `[{"configuration":{"name":"demo_old","labels":{"io.github.kunalvirwal.acc.project":"demo","io.github.kunalvirwal.acc.network":"old"}}}]`, nil
+		case reflect.DeepEqual(args, []string{"network", "delete", "demo_old"}):
+			if err := commandCtx.Err(); err != nil {
+				t.Errorf("network cleanup inherited canceled log context: %v", err)
+			}
+			events = append(events, "delete old network")
+			return "", nil
+		case reflect.DeepEqual(args, []string{"list", "--format", "json", "--all"}), reflect.DeepEqual(args, []string{"list", "--format", "json"}):
+			return `[{"configuration":{"id":"demo_app_1","labels":{"io.github.kunalvirwal.acc.project":"demo","io.github.kunalvirwal.acc.service":"app","io.github.kunalvirwal.acc.config-hash":"old"}}}]`, nil
+		case reflect.DeepEqual(args, []string{"inspect", "demo_app_1"}):
+			return `[{"configuration":{"id":"demo_app_1","mounts":[]},"status":{"networks":[{"network":"demo_old","ipv4Address":"192.168.64.5/24"}]}}]`, nil
+		case reflect.DeepEqual(args, []string{"stop", "demo_app_1"}):
+			events = append(events, "stop old service")
+			return "", nil
+		case reflect.DeepEqual(args, []string{"delete", "demo_app_1"}):
+			events = append(events, "delete old service")
+			return "", nil
+		case len(args) > 0 && args[0] == "run":
+			if !containsArgument(args, "--dns", "1.1.1.1") {
+				t.Errorf("service run lacks direct Compose DNS: %#v", args)
+			}
+			events = append(events, "run direct DNS service")
+			cancel() // Simulate closing attached logs immediately after startup.
+			return "", nil
+		default:
+			return "", nil
+		}
+	}
+	stream := func(ctx context.Context, _ io.Writer, _ ...string) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	composeClient, err := compose.NewComposeClient(compose.WithContainerClient(&container.Client{
+		Container: container.NewContainerClient(run, stream),
+		Images:    container.NewImageClient(func(context.Context, ...string) (string, error) { return "", nil }, nil),
+		Volumes:   container.NewVolumeClient(run),
+		Networks:  container.NewNetworkClient(run),
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dns := recordingDirectDNSRemover{onRemove: func() { events = append(events, "delete CoreDNS") }}
+	detach := make(chan struct{})
+	close(detach)
+	err = startServicesWithoutCoreDNS(ctx, composeClient, dns, composePath, compose.ParseOptions{}, compose.UpOptions{Attach: true, Detach: detach})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"stop old service", "delete old service", "run direct DNS service", "delete CoreDNS", "delete old network"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %#v, want %#v", events, want)
+	}
+}
+
+type recordingDirectDNSRemover struct {
+	onRemove func()
+}
+
+func (r recordingDirectDNSRemover) RemoveAfterDirectDNS(context.Context, string, []string) (bool, error) {
+	if r.onRemove != nil {
+		r.onRemove()
+	}
+	return true, nil
+}
+
+func containsArgument(args []string, flag, value string) bool {
+	for index := 0; index+1 < len(args); index++ {
+		if args[index] == flag && args[index+1] == value {
+			return true
+		}
+	}
+	return false
 }
 
 func TestDownServicesWithCoreDNSRemovesResourcesInOrder(t *testing.T) {
@@ -107,6 +202,7 @@ func TestDownServicesWithCoreDNSRemovesResourcesInOrder(t *testing.T) {
 	}
 	composeClient, err := compose.NewComposeClient(compose.WithContainerClient(&container.Client{
 		Container: container.NewContainerClient(run, nil),
+		Images:    container.NewImageClient(run, nil),
 		Volumes:   container.NewVolumeClient(run),
 		Networks:  container.NewNetworkClient(run),
 	}))
@@ -128,6 +224,7 @@ type recordingDNSStarter struct {
 	networks     []string
 	dnsByNetwork map[string]netip.Addr
 	onStart      func()
+	onFinalize   func()
 }
 
 type recordingDNSRemover struct {
@@ -151,6 +248,13 @@ func (s *recordingDNSStarter) Start(_ context.Context, project string, networks 
 	return s.dnsByNetwork, nil
 }
 
+func (s *recordingDNSStarter) FinalizeMigration(context.Context, string, []string) (bool, error) {
+	if s.onFinalize != nil {
+		s.onFinalize()
+	}
+	return true, nil
+}
+
 func writeWorkflowCompose(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "compose.yaml")
@@ -168,10 +272,23 @@ services:
 }
 
 func containsCommand(calls [][]string, want []string) bool {
+	want = withoutRuntimeConfigHash(want)
 	for _, call := range calls {
-		if reflect.DeepEqual(call, want) {
+		if reflect.DeepEqual(withoutRuntimeConfigHash(call), want) {
 			return true
 		}
 	}
 	return false
+}
+
+func withoutRuntimeConfigHash(args []string) []string {
+	result := make([]string, 0, len(args))
+	for index := 0; index < len(args); index++ {
+		if args[index] == "--label" && index+1 < len(args) && strings.HasPrefix(args[index+1], "io.github.kunalvirwal.acc.config-hash=") {
+			index++
+			continue
+		}
+		result = append(result, args[index])
+	}
+	return result
 }

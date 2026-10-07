@@ -10,6 +10,8 @@ import (
 const (
 	accProjectLabel        = "io.github.kunalvirwal.acc.project"
 	accServiceLabel        = "io.github.kunalvirwal.acc.service"
+	accConfigHashLabel     = "io.github.kunalvirwal.acc.config-hash"
+	accImageIDLabel        = "io.github.kunalvirwal.acc.image-id"
 	accVolumeLabel         = "io.github.kunalvirwal.acc.volume"
 	accNetworkLabel        = "io.github.kunalvirwal.acc.network"
 	accNetworkCoreDNSLabel = "io.github.kunalvirwal.acc.network.coredns"

@@ -41,7 +41,9 @@ services:
 	var warnings []string
 	run := func(_ context.Context, args ...string) (string, error) {
 		switch {
-		case reflect.DeepEqual(args, []string{"run", "--name", "demo_api_1", "--dns", "1.1.1.1", "--dns", "8.8.8.8", "--label", accProjectLabel + "=demo", "--label", accServiceLabel + "=api", "--network", "demo_default", "-d", "alpine"}):
+		case reflect.DeepEqual(args, []string{"list", "--format", "json", "--all"}):
+			return "[]", nil
+		case hasCall([][]string{args}, []string{"run", "--name", "demo_api_1", "--dns", "1.1.1.1", "--dns", "8.8.8.8", "--label", accProjectLabel + "=demo", "--label", accServiceLabel + "=api", "--network", "demo_default", "-d", "alpine"}):
 			return "demo_api_1", nil
 		case reflect.DeepEqual(args, []string{"inspect", "demo_api_1"}):
 			return `[{"configuration":{"id":"demo_api_1","mounts":[]},"status":{"networks":[{"network":"demo_default","ipv4Address":"192.168.64.3/24","ipv6Address":"fde2:6153::3/64"}]}}]`, nil
@@ -57,11 +59,15 @@ services:
 		if reflect.DeepEqual(args, []string{"network", "create", "--label", accNetworkLabel + "=default", "--label", accNetworkCoreDNSLabel + "=false", "--label", accProjectLabel + "=demo", "demo_default"}) {
 			return "demo_default", nil
 		}
+		if reflect.DeepEqual(args, []string{"network", "list", "--format", "json"}) {
+			return "[]", nil
+		}
 		t.Fatalf("unexpected network command: %#v", args)
 		return "", nil
 	}
 	client := &ComposeClient{containerClient: &container.Client{
 		Container: container.NewContainerClient(run, nil),
+		Images:    newTestImageClient(),
 		Volumes:   container.NewVolumeClient(run),
 		Networks:  container.NewNetworkClient(networkRun),
 	}, registry: registry}
@@ -124,6 +130,7 @@ services:
 	}
 	client := &ComposeClient{containerClient: &container.Client{
 		Container: container.NewContainerClient(run, nil),
+		Images:    newTestImageClient(),
 		Volumes:   container.NewVolumeClient(run),
 		Networks:  container.NewNetworkClient(run),
 	}, registry: registry}
