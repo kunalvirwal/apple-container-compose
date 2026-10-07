@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          mkdir -p dist
+
+          go build \
+            -trimpath \
+            -o dist/acc \
+            ./cmd/acc
+
+          tar -C dist \
+            -czf "acc_${VERSION}_darwin_arm64.tar.gz" \
+            acc
+
+      - name: Generate checksum
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          shasum -a 256 \
+            "acc_${VERSION}_darwin_arm64.tar.gz" \
+            > "acc_${VERSION}_darwin_arm64.tar.gz.sha256"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          gh release create "$GITHUB_REF_NAME" \
+            "acc_${VERSION}_darwin_arm64.tar.gz" \
+            "acc_${VERSION}_darwin_arm64.tar.gz.sha256" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
