@@ -12,15 +12,18 @@ import (
 
 // DownOptions controls compose down behavior.
 type DownOptions struct {
-	// Services limits teardown to selected services. Empty means all services.
+	// Services selects services and their transitive dependents for teardown.
+	// Empty means all services.
 	Services []string
 	// RemoveOrphans also removes project containers whose service is no longer
 	// declared in the current Compose file.
 	RemoveOrphans bool
 	// Force forces container deletion when supported by the runtime.
 	Force bool
-	// Volumes removes named volumes created for the project. As with Docker
-	// Compose, named volumes are retained unless this option is set.
+	// Volumes removes eligible ACC-owned named and anonymous volumes. With
+	// Services set, only volumes attached to containers removed by this invocation
+	// are eligible, and volumes referenced by any remaining container are retained.
+	// Without Services, detached project-owned named volumes are also eligible.
 	Volumes bool
 	// OnWarning receives non-fatal warnings. The SDK never renders warnings
 	// itself; callers decide whether and how to present them.
@@ -84,7 +87,12 @@ func (c *ComposeClient) PrepareDown(ctx context.Context, path string, parseOpts 
 	serviceIDs := downContainerIDs(project, services, containers, opts.RemoveOrphans)
 	attachedVolumeNames := make(map[string]struct{})
 	retainedVolumeNames := make(map[string]struct{})
-	if opts.Volumes && len(opts.Services) == 0 && len(serviceIDs) > 0 {
+	for _, volume := range project.Volumes {
+		if volume.External {
+			retainedVolumeNames[volume.Name] = struct{}{}
+		}
+	}
+	if opts.Volumes && len(serviceIDs) > 0 {
 		details, err := c.containerClient.Container.InspectDetails(ctx, serviceIDs)
 		if err != nil {
 			if !isNotFoundLikeError(err) {
@@ -161,15 +169,59 @@ func (p *DownSession) RemoveResources(ctx context.Context) error {
 }
 
 // RemoveVolumes removes eligible project volumes after the selected service
-// containers are gone. Named volumes still mounted by retained orphans are
-// left intact.
+// containers are gone. For selected-service teardown, only attached volumes
+// without references from any remaining container are eligible.
 func (p *DownSession) RemoveVolumes(ctx context.Context) error {
 	if p == nil || p.client == nil || p.client.containerClient == nil {
 		return ErrDownSessionInvalid
 	}
-	if p.opts.Volumes && len(p.opts.Services) == 0 {
-		if err := p.client.removeProjectVolumes(ctx, p.projectName, p.attachedVolumeNames, p.retainedVolumeNames); err != nil {
+	if p.opts.Volumes {
+		attachedOnly := len(p.opts.Services) > 0
+		if attachedOnly {
+			if len(p.attachedVolumeNames) == 0 {
+				return nil
+			}
+			if err := p.retainReferencedVolumes(ctx); err != nil {
+				return err
+			}
+		}
+		if err := p.client.removeProjectVolumes(ctx, p.projectName, p.attachedVolumeNames, p.retainedVolumeNames, attachedOnly); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// retainReferencedVolumes checks all remaining containers, including stopped,
+// foreign, and infrastructure containers. Incomplete inspection fails closed:
+// missing container records are not evidence that a volume is unused.
+func (p *DownSession) retainReferencedVolumes(ctx context.Context) error {
+	containers, err := p.client.containerClient.Container.ListSummaries(ctx, container.ListOptions{All: true})
+	if err != nil {
+		return fmt.Errorf("list remaining containers for volume cleanup: %w", err)
+	}
+	if len(containers) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(containers))
+	for _, item := range containers {
+		ids = append(ids, item.ID)
+	}
+	sort.Strings(ids)
+	details, err := p.client.containerClient.Container.InspectDetails(ctx, ids)
+	if err != nil {
+		return fmt.Errorf("inspect remaining containers for volume cleanup: %w", err)
+	}
+	inspected := make(map[string]struct{}, len(details))
+	for _, item := range details {
+		inspected[item.ID] = struct{}{}
+		for _, name := range item.VolumeNames {
+			p.retainedVolumeNames[name] = struct{}{}
+		}
+	}
+	for _, id := range ids {
+		if _, found := inspected[id]; !found {
+			return fmt.Errorf("inspect remaining container %q for volume cleanup: missing container metadata", id)
 		}
 	}
 	return nil
@@ -231,8 +283,9 @@ func hasRemainingProjectContainers(projectName string, containers []container.Co
 // mounted by retained orphan containers, plus explicitly-created anonymous
 // volumes mounted by containers removed in this Down invocation. Detached
 // anonymous volumes are retained: without their former container there is no
-// safe association with this teardown.
-func (c *ComposeClient) removeProjectVolumes(ctx context.Context, projectName string, attachedVolumeNames, retainedVolumeNames map[string]struct{}) error {
+// safe association with this teardown. With attachedOnly, named volumes must
+// also have been attached to a container removed by this invocation.
+func (c *ComposeClient) removeProjectVolumes(ctx context.Context, projectName string, attachedVolumeNames, retainedVolumeNames map[string]struct{}, attachedOnly bool) error {
 	volumes, err := c.containerClient.Volumes.ListSummaries(ctx)
 	if err != nil {
 		return err
@@ -246,7 +299,7 @@ func (c *ComposeClient) removeProjectVolumes(ctx context.Context, projectName st
 		if _, retained := retainedVolumeNames[volume.Name]; retained {
 			continue
 		}
-		if isAnonymousVolume(projectName, volume) {
+		if attachedOnly || isAnonymousVolume(projectName, volume) {
 			if _, attached := attachedVolumeNames[volume.Name]; !attached {
 				continue
 			}

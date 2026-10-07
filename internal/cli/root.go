@@ -158,7 +158,7 @@ func newDownCommand(rootOpts *rootOptions, executeDown func(context.Context, str
 		},
 	}
 	cmd.Flags().BoolVar(&removeOrphans, "remove-orphans", false, "Remove containers for services not declared in the Compose file")
-	cmd.Flags().BoolVarP(&volumes, "volumes", "v", false, "Remove named volumes declared by the project")
+	cmd.Flags().BoolVarP(&volumes, "volumes", "v", false, "Remove ACC-owned volumes; with services selected, remove only their attached, unused volumes")
 	return cmd
 }
 
