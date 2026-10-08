@@ -20,16 +20,11 @@ Currently `acc` utilises a coredns image with acc plugin built-in, `docker.io/ku
 
 ACC's intended runtime model is one CoreDNS container for each Compose project:
 
-```text
-                         global ACC state.json
-                                  |
-                                  | read-only mount
-                                  v
-Compose services --> project CoreDNS + ACC plugin --> upstream DNS
-      |                   |
-      |                   +-- attached to every project network
-      +-- configured to use the project CoreDNS instance
-```
+![ACC service-discovery architecture: the CLI updates a global state file mounted read-only by project CoreDNS, which serves containers across two Compose networks and forwards external DNS queries.](../docs/acc-dns-architecture.png)
+
+The diagram shows an example project with two networks. `1.1.1.1` is an
+example upstream resolver. External-name queries use a service's Compose `dns`
+servers when configured, otherwise CoreDNS's configured upstream resolvers.
 
 The CoreDNS instance is scoped to one Compose project, but the registry is
 global. That distinction matters for shared external networks: services from
