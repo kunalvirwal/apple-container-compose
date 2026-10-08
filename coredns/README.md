@@ -205,7 +205,8 @@ last-known-good registry.
 
 ## Caching
 
-Do not place CoreDNS's ordinary `cache` plugin before `acc`.
+Do not place CoreDNS's ordinary `cache` plugin before `acc`. As standard shared 
+DNS caching is intentionally unsupported.
 
 Standard CoreDNS cache keys do not contain the requesting source IP or its
 network memberships. A cached answer for one container could therefore expose
@@ -249,7 +250,3 @@ go vet ./...
 - Dynamic upstream forwarding supports configured nameserver IP addresses only;
   `dns_search`, `dns_opt`, resolver hostnames, and non-default resolver ports
   are not implemented.
-- Standard shared DNS caching is intentionally unsupported.
-- The plugin does not create networks, start CoreDNS, configure `--dns`, or
-  write state. Those responsibilities belong to ACC's pending Compose runtime
-  integration.

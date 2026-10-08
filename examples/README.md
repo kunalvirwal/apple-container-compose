@@ -1,6 +1,6 @@
 # ACC Compose examples
 
-Build the CLI once before running an example:
+Build the CLI once before running an example if building from source code:
 
 ```sh
 make build
@@ -27,5 +27,5 @@ as are external volumes and unrelated detached volumes. For example:
 - `volumes.compose.yaml`: bind, named, anonymous, and tmpfs mounts. Alternative
   options are documented inline.
 - `networks.compose.yaml`: isolated, multi-network, and implicit-default
-  services; network-scoped aliases; and the state records that will feed the
-  per-project CoreDNS container.
+  services, network-scoped aliases, and service discovery through the per-project
+  CoreDNS container.
