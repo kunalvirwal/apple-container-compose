@@ -33,10 +33,14 @@ type UpOptions struct {
 	// RemoveOrphans removes ACC-owned containers for services that are no
 	// longer declared by the loaded Compose project.
 	RemoveOrphans bool
-	// Output receives build output and attached service logs when enabled.
+	// Output receives attached service logs and is the fallback for build and
+	// runtime output.
 	Output io.Writer
 	// BuildOutput receives build output. When nil, Output is used.
 	BuildOutput io.Writer
+	// RuntimeOutput receives startup output, including automatic image-pull
+	// progress, even when Attach is false. When nil, Output is used.
+	RuntimeOutput io.Writer
 	// Attach streams service logs until detached or context cancellation.
 	Attach bool
 	// Detach, when non-nil, detaches attached log streaming when signaled.
@@ -266,9 +270,22 @@ func (p *UpSession) StartServices(ctx context.Context, startOpts ServiceStartOpt
 		return err
 	}
 
+	output := p.opts.Output
+	if output == nil {
+		output = io.Discard
+	}
+	outputLock := &sync.Mutex{}
+	sharedOutput := &synchronizedWriter{mu: outputLock, w: output}
+	runtimeOutput := p.opts.RuntimeOutput
+	if runtimeOutput == nil && p.opts.Output != nil {
+		runtimeOutput = sharedOutput
+	} else if runtimeOutput != nil {
+		// Callers may route both channels to the same underlying writer.
+		runtimeOutput = &synchronizedWriter{mu: outputLock, w: runtimeOutput}
+	}
 	var logSession *serviceLogSession
 	if p.opts.Attach {
-		logSession = newServiceLogSession(p.client, ctx, p.opts.Output, len(p.services))
+		logSession = newServiceLogSession(p.client, ctx, sharedOutput, len(p.services))
 		p.logSession = logSession
 		defer func() {
 			if err != nil {
@@ -294,7 +311,7 @@ func (p *UpSession) StartServices(ctx context.Context, startOpts ServiceStartOpt
 					return fmt.Errorf("delete service %q for recreation: %w", plan.serviceName, err)
 				}
 			}
-			if _, err := p.client.containerClient.Container.Run(ctx, plan.image, plan.options); err != nil {
+			if _, err := p.client.containerClient.Container.RunStreaming(ctx, plan.image, plan.options, runtimeOutput); err != nil {
 				return fmt.Errorf("start service %q: %w", plan.serviceName, err)
 			}
 		}
@@ -932,7 +949,7 @@ func newServiceLogSession(client *ComposeClient, ctx context.Context, output io.
 		client: client,
 		ctx:    streamCtx,
 		cancel: cancel,
-		writer: &synchronizedWriter{w: output},
+		writer: &synchronizedWriter{mu: &sync.Mutex{}, w: output},
 		errCh:  make(chan error, serviceCount),
 	}
 }
@@ -994,7 +1011,7 @@ func (s *serviceLogSession) followServiceLogs(containerID string, output io.Writ
 }
 
 type synchronizedWriter struct {
-	mu sync.Mutex
+	mu *sync.Mutex
 	w  io.Writer
 }
 

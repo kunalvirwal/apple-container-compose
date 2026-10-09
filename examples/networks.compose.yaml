@@ -11,8 +11,7 @@ services:
       - /data
 
   backend:
-    image: alpine:3.20
-    command: ["sh", "-c", "while true; do echo backend-ready; sleep 5; done"]
+    image: nginx:latest
     networks:
       - private
     volumes:
@@ -21,7 +20,7 @@ services:
         target: /var/lib/app
 
   relay:
-    image: alpine:3.20
+    image: busybox:1.37.0
     command: ["sh", "-c", "while true; do echo relay-ready; sleep 5; done"]
     depends_on:
       - frontend

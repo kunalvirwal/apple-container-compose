@@ -16,9 +16,8 @@ container for each Compose project**. Services on a shared network resolve each
 other by name and network-scoped alias like docker networks, without patching `/etc/hosts`.
 This also allows DNS tools such as `dig` and `nslookup` to work inside containers.
 
-![ACC architecture: the CLI manages containers and DNS state, while project CoreDNS provides service discovery across Compose networks and forwards external DNS queries.](docs/acc-dns-architecture.png)
+![ACC demo: running a Compose project with Apple's container runtime.](docs/demo.webp)
 
-*Example project with two networks; `1.1.1.1` represents an upstream DNS resolver.*
 Read more about [DNS behavior and configuration](coredns/README.md#how-acc-uses-the-plugin).
 
 ACC provides a command-line tool and Go packages for container management and

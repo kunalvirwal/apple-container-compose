@@ -55,7 +55,7 @@ func (c *ComposeClient) Logs(ctx context.Context, path string, parseOpts ParseOp
 func (c *ComposeClient) streamServiceLogs(ctx context.Context, projectName string, services []string, follow bool, output io.Writer) error {
 	errCh := make(chan error, len(services))
 	var wg sync.WaitGroup
-	sharedWriter := &synchronizedWriter{w: output}
+	sharedWriter := &synchronizedWriter{mu: &sync.Mutex{}, w: output}
 
 	for _, serviceName := range services {
 		containerID := containerName(projectName, serviceName)

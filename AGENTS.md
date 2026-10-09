@@ -15,8 +15,9 @@ CLI. It has two layers:
 The module path is `github.com/kunalvirwal/apple-container-compose`, and the
 required Go version is declared in `go.mod`.
 
-The CLI owns terminal presentation: build output is purple and service log
-lines receive stable, distinct ANSI colors based on their service prefix.
+The CLI owns terminal presentation: ACC events are purple, build and pull output
+is blue, and service log lines receive stable, distinct ANSI colors based on
+their service prefix. Reserve purple and blue for events and progress output.
 Preserve `--no-color` as the opt-out, and do not put terminal styling in the
 public `pkg` SDK.
 

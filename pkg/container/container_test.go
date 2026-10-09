@@ -1,12 +1,80 @@
 package container
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net/netip"
 	"reflect"
 	"testing"
 )
+
+func TestContainerRunStreaming(t *testing.T) {
+	tests := []struct {
+		name     string
+		output   string
+		runErr   error
+		wantErr  error
+		fallback bool
+	}{
+		{name: "pull progress", output: "pulling alpine\rdownload complete\n"},
+		{name: "buffered fallback", output: "pulling alpine\n", fallback: true},
+		{name: "runtime failure", output: "registry unavailable\n", runErr: io.ErrUnexpectedEOF, wantErr: io.ErrUnexpectedEOF},
+		{name: "cancellation", output: "pull interrupted\n", runErr: fmt.Errorf("run: %w", context.Canceled), wantErr: context.Canceled},
+		{name: "cancellation with XPC output", output: "XPC connection error\n", runErr: fmt.Errorf("run: %w", context.Canceled), wantErr: context.Canceled},
+		{name: "system failure", output: "XPC connection error\n", runErr: io.ErrUnexpectedEOF, wantErr: ErrSystemNotRunning},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var output bytes.Buffer
+			var calls [][]string
+			run := func(_ context.Context, args ...string) (string, error) {
+				if !tt.fallback {
+					t.Fatal("streaming run used the buffered runner")
+				}
+				calls = append(calls, append([]string(nil), args...))
+				return tt.output, tt.runErr
+			}
+			stream := func(_ context.Context, out io.Writer, args ...string) (string, error) {
+				calls = append(calls, append([]string(nil), args...))
+				if _, err := io.WriteString(out, tt.output); err != nil {
+					t.Fatal(err)
+				}
+				return tt.output, tt.runErr
+			}
+			if tt.fallback {
+				stream = nil
+			}
+			client := NewContainerClient(run, stream)
+			_, err := client.RunStreaming(context.Background(), "alpine", CreateOptions{Name: "app"}, &output)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("RunStreaming() error = %v, want %v", err, tt.wantErr)
+			}
+			if output.String() != tt.output {
+				t.Fatalf("output = %q, want %q", output.String(), tt.output)
+			}
+			if want := [][]string{{"run", "--name", "app", "-d", "alpine"}}; !reflect.DeepEqual(calls, want) {
+				t.Fatalf("calls = %#v, want %#v", calls, want)
+			}
+		})
+	}
+}
+
+func TestContainerRunStreamingValidatesBeforeExecution(t *testing.T) {
+	client := NewContainerClient(func(context.Context, ...string) (string, error) {
+		t.Fatal("invalid options reached the buffered runner")
+		return "", nil
+	}, func(context.Context, io.Writer, ...string) (string, error) {
+		t.Fatal("invalid options reached the streaming runner")
+		return "", nil
+	})
+	_, err := client.RunStreaming(context.Background(), "alpine", CreateOptions{Memory: "128M"}, io.Discard)
+	if !errors.Is(err, ErrInvalidOptions) {
+		t.Fatalf("RunStreaming() error = %v, want ErrInvalidOptions", err)
+	}
+}
 
 func TestContainerRunNameservers(t *testing.T) {
 	var calls [][]string

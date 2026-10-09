@@ -162,7 +162,9 @@ type BuildOptions struct {
 
 // Build builds an image, streams command output to the provided writer, and returns the image id created.
 func (i *ImageClient) Build(ctx context.Context, opts BuildOptions, out io.Writer) (string, error) {
-	args := []string{"build"}
+	// Build output is piped through a writer rather than attached to a terminal.
+	// Plain progress preserves build steps alongside the caller's own output.
+	args := []string{"build", "--progress", "plain"}
 
 	contextPath := opts.ContextDir
 	if contextPath == "" {

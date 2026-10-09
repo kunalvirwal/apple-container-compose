@@ -4,10 +4,67 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/kunalvirwal/apple-container-compose/pkg/compose"
 )
+
+func TestUpDisplaysEventsBuildsAndPullsWhenDetached(t *testing.T) {
+	for _, noColor := range []bool{false, true} {
+		name := "colored"
+		if noColor {
+			name = "no color"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := newRootCommand(
+				func() (composeService, error) { return fatalDiagnosticComposeClient{}, nil },
+				func(_ context.Context, _ string, _ compose.ParseOptions, opts compose.UpOptions, _ bool) error {
+					if opts.Attach {
+						t.Fatal("detached up enabled service log attachment")
+					}
+					if err := writeReconcileLine(opts.Output, "Preparing Compose project"); err != nil {
+						return err
+					}
+					// Progress without a newline must be visible immediately.
+					if _, err := io.WriteString(opts.BuildOutput, "#1 building image\r"); err != nil {
+						return err
+					}
+					_, err := io.WriteString(opts.RuntimeOutput, "pulling alpine\r")
+					return err
+				},
+				func(context.Context, string, compose.ParseOptions, compose.DownOptions) error { return nil },
+			)
+			var output bytes.Buffer
+			root.SetOut(&output)
+			args := []string{"up", "-d", "--build", "--file", "compose.yaml"}
+			if noColor {
+				args = append(args, "--no-color")
+			}
+			root.SetArgs(args)
+			if err := root.Execute(); err != nil {
+				t.Fatal(err)
+			}
+			for _, item := range []struct{ message, color string }{
+				{"[ACC] Preparing Compose project\n", ansiPurple},
+				{"#1 building image\r", ansiBlue},
+				{"pulling alpine\r", ansiBlue},
+			} {
+				message := item.message
+				if !noColor {
+					message = item.color + message + ansiReset
+				}
+				if !strings.Contains(output.String(), message) {
+					t.Fatalf("missing %q in output %q", message, output.String())
+				}
+			}
+			if got := strings.Contains(output.String(), ansiPurple); got == noColor {
+				t.Fatalf("purple output = %v with noColor = %v", got, noColor)
+			}
+		})
+	}
+}
 
 func TestUpMarksFatalDiagnosticAsReported(t *testing.T) {
 	client := fatalDiagnosticComposeClient{}

@@ -3,6 +3,7 @@ package container
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -401,12 +402,37 @@ const (
 
 // Run creates and starts a new container based on the provided image and options. Returns true if the container was successfully created and started, or an error if the operation fails.
 func (c *ContainerClient) Run(ctx context.Context, image string, opts CreateOptions) (bool, error) {
+	return c.runWithOutput(ctx, image, opts, nil)
+}
+
+// RunStreaming creates and starts a container while forwarding runtime output,
+// including automatic image-pull progress, to out. Output is also retained for
+// command errors. Without a streaming runner, captured output is forwarded when
+// the command finishes.
+func (c *ContainerClient) RunStreaming(ctx context.Context, image string, opts CreateOptions, out io.Writer) (bool, error) {
+	return c.runWithOutput(ctx, image, opts, out)
+}
+
+func (c *ContainerClient) runWithOutput(ctx context.Context, image string, opts CreateOptions, output io.Writer) (bool, error) {
 	args, err := runArgs(image, opts)
 	if err != nil {
 		return false, err
 	}
-	out, err := c.run(ctx, args...)
+	var out string
+	if output != nil && c.runStreaming != nil {
+		out, err = c.runStreaming(ctx, output, args...)
+	} else {
+		out, err = c.run(ctx, args...)
+		if output != nil {
+			if _, writeErr := io.WriteString(output, out); err == nil {
+				err = writeErr
+			}
+		}
+	}
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return false, err
+		}
 		if strings.Contains(out, "XPC connection error") {
 			return false, ErrSystemNotRunning
 		} else if strings.Contains(out, "already exists") {

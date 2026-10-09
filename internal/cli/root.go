@@ -103,6 +103,7 @@ func newUpCommand(rootOpts *rootOptions, executeUp func(context.Context, string,
 				RemoveOrphans:         removeOrphans,
 				Output:                newServiceLogWriter(output, !rootOpts.noColor),
 				BuildOutput:           newBuildLogWriter(output, !rootOpts.noColor),
+				RuntimeOutput:         newPullLogWriter(output, !rootOpts.noColor),
 				Attach:                !detach,
 				OnWarning: func(message string) {
 					_ = writeWarning(output, !rootOpts.noColor, message)

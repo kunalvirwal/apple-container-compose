@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -14,6 +15,102 @@ import (
 	"github.com/kunalvirwal/apple-container-compose/pkg/compose"
 	"github.com/kunalvirwal/apple-container-compose/pkg/container"
 )
+
+func TestUpRoutesRuntimeProgressThroughBlueWriter(t *testing.T) {
+	for _, noColor := range []bool{false, true} {
+		name := "colored"
+		if noColor {
+			name = "no color"
+		}
+		t.Run(name, func(t *testing.T) {
+			path := writeWorkflowCompose(t)
+			detach := make(chan struct{})
+			run := func(_ context.Context, args ...string) (string, error) {
+				if reflect.DeepEqual(args, []string{"network", "inspect", "demo_default"}) {
+					return "network not found", errors.New("command failed")
+				}
+				return "", nil
+			}
+			progress := []string{
+				"[0/6] [0s]\n",
+				"[1/6] Fetching image [0s]\n",
+				"[2/6] Unpacking image [0s]\n",
+				"[3/6] Fetching kernel [0s]\n",
+				"[4/6] Fetching init image [0s]\n",
+				"[5/6] Unpacking init image [0s]\n",
+				"[6/6] Starting container [0s]\n",
+			}
+			stream := func(ctx context.Context, output io.Writer, args ...string) (string, error) {
+				if len(args) > 0 && args[0] == "run" {
+					for _, line := range progress {
+						if _, err := io.WriteString(output, line); err != nil {
+							return "", err
+						}
+					}
+					return strings.Join(progress, ""), nil
+				}
+				if _, err := io.WriteString(output, "app-ready\n"); err != nil {
+					return "", err
+				}
+				close(detach)
+				<-ctx.Done()
+				return "app-ready\n", ctx.Err()
+			}
+			runtime := &container.Client{
+				Container: container.NewContainerClient(run, stream),
+				Images:    container.NewImageClient(run, nil),
+				Volumes:   container.NewVolumeClient(run),
+				Networks:  container.NewNetworkClient(run),
+			}
+			client, err := compose.NewComposeClient(compose.WithContainerClient(runtime))
+			if err != nil {
+				t.Fatal(err)
+			}
+			dns := &recordingDNSStarter{dnsByNetwork: map[string]netip.Addr{"demo_default": netip.MustParseAddr("192.168.64.2")}}
+			root := newRootCommand(
+				func() (composeService, error) { return client, nil },
+				func(ctx context.Context, path string, parseOpts compose.ParseOptions, opts compose.UpOptions, _ bool) error {
+					opts.Detach = detach
+					return startServicesWithCoreDNS(ctx, client, dns, path, parseOpts, opts, newUpReporter(runtime, opts.Output))
+				},
+				func(context.Context, string, compose.ParseOptions, compose.DownOptions) error { return nil },
+			)
+			var output bytes.Buffer
+			root.SetOut(&output)
+			args := []string{"up", "--file", path}
+			if noColor {
+				args = append(args, "--no-color")
+			}
+			root.SetArgs(args)
+			if err := root.Execute(); err != nil {
+				t.Fatal(err)
+			}
+			for _, line := range progress {
+				want := line
+				if !noColor {
+					want = ansiBlue + line + ansiReset
+				}
+				if !strings.Contains(output.String(), want) {
+					t.Fatalf("runtime progress missing correct color %q in %q", want, output.String())
+				}
+			}
+			if !strings.Contains(output.String(), "[app] app-ready\n") {
+				t.Fatalf("attached service logs missing in %q", output.String())
+			}
+			preparing := "[ACC] Preparing Compose project with ACC CoreDNS\n"
+			if !noColor {
+				preparing = ansiPurple + preparing + ansiReset
+			}
+			if !strings.Contains(output.String(), preparing) {
+				t.Fatalf("ACC event missing correct color %q in %q", preparing, output.String())
+			}
+			if noColor && strings.Contains(output.String(), "\x1b[") {
+				t.Fatalf("no-color output contains ANSI styling: %q", output.String())
+			}
+			t.Logf("captured output: %q", output.String())
+		})
+	}
+}
 
 func TestStartServicesWithCoreDNSStartsCoreDNSBeforeServices(t *testing.T) {
 	composePath := writeWorkflowCompose(t)
@@ -117,7 +214,10 @@ func TestStartServicesWithoutCoreDNSCleansUpBeforeAttachedLogWait(t *testing.T) 
 			return "", nil
 		}
 	}
-	stream := func(ctx context.Context, _ io.Writer, _ ...string) (string, error) {
+	stream := func(ctx context.Context, _ io.Writer, args ...string) (string, error) {
+		if len(args) > 0 && args[0] == "run" {
+			return run(ctx, args...)
+		}
 		<-ctx.Done()
 		return "", ctx.Err()
 	}
